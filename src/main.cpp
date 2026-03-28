@@ -1,40 +1,43 @@
 #include <Arduino.h>
-#include <Adafruit_NeoPixel.h>
+#include <SCServo.h>
 
-constexpr uint8_t kRgbLedPin = 10;
-constexpr uint8_t kRgbLedCount = 1;
+// ESP32-C3-Zero default UART0 pins exposed as TX=GPIO21, RX=GPIO20.
+constexpr int kServoTxPin = 21;
+constexpr int kServoRxPin = 20;
+constexpr uint8_t kServoId = 1;
 
-Adafruit_NeoPixel pixels(kRgbLedCount, kRgbLedPin, NEO_GRB + NEO_KHZ800);
+// SC09 range is 0..1023 for ~300 degrees.
+constexpr uint16_t kPosA = 200;
+constexpr uint16_t kPosB = 800;
+constexpr uint16_t kSpeed = 1500;
+constexpr uint32_t kHalfPeriodMs = 500;
 
-void setColor(uint8_t r, uint8_t g, uint8_t b) {
-  pixels.setPixelColor(0, pixels.Color(r, g, b));
-  pixels.show();
-}
+SCSCL sc;
 
 void setup() {
   Serial.begin(115200);
-  delay(500);
-  pixels.begin();
-  pixels.clear();
-  pixels.setBrightness(32);
-  pixels.show();
-  Serial.println("ESP32-C3-Zero WS2812 test started (GPIO10)");
+  delay(300);
+
+  Serial1.begin(1000000, SERIAL_8N1, kServoRxPin, kServoTxPin);
+  sc.pSerial = &Serial1;
+
+  Serial.println("SC09 UART test started");
+  Serial.println("Using ID=1, UART=1Mbps, TX=GPIO21, RX=GPIO20");
 }
 
 void loop() {
-  setColor(255, 0, 0);
-  Serial.println("RGB RED");
-  delay(500);
+  int id = sc.Ping(kServoId);
+  if (id == -1) {
+    Serial.println("Ping failed: check power, ID, UART pins, and baud");
+    delay(1000);
+    return;
+  }
 
-  setColor(0, 255, 0);
-  Serial.println("RGB GREEN");
-  delay(500);
+  sc.WritePos(kServoId, kPosA, 0, kSpeed);
+  Serial.println("Move A");
+  delay(kHalfPeriodMs);
 
-  setColor(0, 0, 255);
-  Serial.println("RGB BLUE");
-  delay(500);
-
-  setColor(0, 0, 0);
-  Serial.println("RGB OFF");
-  delay(500);
+  sc.WritePos(kServoId, kPosB, 0, kSpeed);
+  Serial.println("Move B");
+  delay(kHalfPeriodMs);
 }
