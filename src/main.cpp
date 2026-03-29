@@ -13,11 +13,11 @@ const uint16_t PWM_FREQ = 1000;  // Hz
 const uint8_t PWM_RESOLUTION = 8;  // 8-bit = 0..255
 const uint8_t SERVO_UART_TX_PIN = 21;
 const uint8_t SERVO_UART_RX_PIN = 20;
-const uint32_t SERVO_BAUD = 1000000;  // SC09 braucht 1 Mbps, nicht 38400!
+const uint32_t SERVO_BAUD = 1000000;  // SC09 braucht 1 Mbps
 const uint8_t SERVO_ID = 1;
 const uint16_t SERVO_POS_MIN = 0;
 const uint16_t SERVO_POS_MAX = 1023;
-const uint16_t SERVO_SPEED = 4095;  // Maximum speed for SC09
+const uint16_t SERVO_SPEED = 4095;  // Explicit max speed (stable setting)
 
 // ============ GLOBALE VARIABLEN ============
 AsyncWebServer server(80);
@@ -325,7 +325,7 @@ void loop() {
 
   // Kontinuierliche Servo-Ansteuerung (periodisches Refresh)
   static unsigned long lastServoUpdate = 0;
-  if (millis() - lastServoUpdate >= 50) {  // Alle 50ms
+  if (millis() - lastServoUpdate >= 50) {  // Alle 50ms: weniger UART-Last, gleiches Fahrgefühl
     applyServoFromMotorValue(currentMotorValue);
     lastServoUpdate = millis();
   }
