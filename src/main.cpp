@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
+#include <SCServo.h>
 
 // ============ KONFIGURATION ============
 const char* WIFI_SSID = "TurningHeads";
@@ -10,6 +11,13 @@ const uint16_t PWM_PIN = 3;  // PWM für Motor an GPIO3
 const uint8_t PWM_CHANNEL = 0;
 const uint16_t PWM_FREQ = 1000;  // Hz
 const uint8_t PWM_RESOLUTION = 8;  // 8-bit = 0..255
+const uint8_t SERVO_UART_TX_PIN = 21;
+const uint8_t SERVO_UART_RX_PIN = 20;
+const uint32_t SERVO_BAUD = 1000000;  // SC09 braucht 1 Mbps, nicht 38400!
+const uint8_t SERVO_ID = 1;
+const uint16_t SERVO_POS_MIN = 0;
+const uint16_t SERVO_POS_MAX = 1023;
+const uint16_t SERVO_SPEED = 4095;  // Maximum speed for SC09
 
 // ============ GLOBALE VARIABLEN ============
 AsyncWebServer server(80);
@@ -17,6 +25,8 @@ AsyncWebSocket ws("/ws");
 WiFiServer tcpServer(TCP_PORT);
 WiFiClient tcpClient;
 uint8_t currentMotorValue = 0;  // Aktueller PWM-Wert für Motor (0..255)
+uint8_t currentServoAngle = 90; // Aktueller Servo-Winkel (0..180)
+SCSCL scServo;
 
 // ============ HILFSFUNKTION: HTML/CSS/JS WEB-UI ============
 const char* getWebPage() {
@@ -101,7 +111,7 @@ const char* getWebPage() {
     <label>Motor Speed</label>
     <input type="range" id="motorSlider" min="0" max="255" value="0">
     <div id="value">0</div>
-    
+
     <div id="status">
       <div>WebSocket: <span id="wsStatus" class="status-error">Disconnected</span></div>
       <div>Node: <span id="nodeStatus" class="status-error">No signal</span></div>
@@ -115,6 +125,16 @@ const char* getWebPage() {
     const valueDisplay = document.getElementById('value');
     const wsStatus = document.getElementById('wsStatus');
     const nodeStatus = document.getElementById('nodeStatus');
+
+    function sendMotorState(value) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      ws.send(JSON.stringify({
+        motor: value
+      }));
+    }
 
     // WebSocket verbunden
     ws.onopen = function(event) {
@@ -141,21 +161,18 @@ const char* getWebPage() {
         nodeStatus.textContent = 'Disconnected';
         nodeStatus.className = 'status-error';
       }
+
+      if (typeof data.motor === 'number') {
+        slider.value = data.motor;
+        valueDisplay.textContent = data.motor;
+      }
     };
 
-    // Slider-Event: Live Slider-Wert senden
+    // Slider-Event: Live Motor-Wert senden
     slider.addEventListener('input', function() {
-      const value = parseInt(slider.value);
-      valueDisplay.textContent = value;
-      
-      // Sende JSON zum Coordinator übers WebSocket
-      const payload = JSON.stringify({
-        motor: value
-      });
-      
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(payload);
-      }
+      const motorValue = parseInt(slider.value, 10);
+      valueDisplay.textContent = motorValue;
+      sendMotorState(motorValue);
     });
 
     // Optional: Initial-Status abfragen
@@ -168,6 +185,37 @@ const char* getWebPage() {
 </body>
 </html>
 )rawliteral";
+}
+
+void applyServoFromMotorValue(uint8_t motorValue) {
+  // Direkt mapping: 0..255 -> 0..1023
+  uint16_t targetPos = (uint16_t)(motorValue * 1023 / 255);
+  scServo.WritePos(SERVO_ID, targetPos, 0, SERVO_SPEED);
+  currentServoAngle = motorValue;  // Vereinfacht: direkt kopieren
+  // Debug-Ausgabe entfernt (war alle 50ms!)
+}
+
+bool parseJsonIntInRange(const char* buffer, const char* key, int minVal, int maxVal, int* outValue) {
+  char keyPattern[32];
+  snprintf(keyPattern, sizeof(keyPattern), "\"%s\"", key);
+
+  char *keyPos = strstr(buffer, keyPattern);
+  if (keyPos == NULL) {
+    return false;
+  }
+
+  char *colon = strchr(keyPos, ':');
+  if (colon == NULL) {
+    return false;
+  }
+
+  int value = atoi(colon + 1);
+  if (value < minVal || value > maxVal) {
+    return false;
+  }
+
+  *outValue = value;
+  return true;
 }
 
 // ============ WEBSOCKET EVENT HANDLER ============
@@ -188,27 +236,28 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
       buffer[len] = '\0';
       
       Serial.printf("[WS] Received: %s\n", buffer);
-      
-      // Parse JSON: {"motor": 123}
-      // Einfache Anfrage: suche "motor": 
-      char *motorStr = strstr(buffer, "\"motor\"");
-      if (motorStr != NULL) {
-        char *colon = strchr(motorStr, ':');
-        int motorValue = (colon != nullptr) ? atoi(colon + 1) : -1;
-        if (motorValue >= 0 && motorValue <= 255) {
-          currentMotorValue = motorValue;
-          analogWrite(PWM_PIN, currentMotorValue);
-          Serial.printf("[MOTOR] Set to %d\n", currentMotorValue);
-          
-          // Weiterleiten an Node über TCP
-          if (tcpClient.connected()) {
-            char tcpMsg[20];
-            snprintf(tcpMsg, sizeof(tcpMsg), "M:%d\n", currentMotorValue);
-            tcpClient.print(tcpMsg);
-          } else {
-            Serial.println("[TCP] Node not connected");
-          }
+
+      int motorValue = -1;
+      if (parseJsonIntInRange(buffer, "motor", 0, 255, &motorValue)) {
+        if ((uint8_t)motorValue != currentMotorValue) {  // Nur bei Änderung ausgeben
+          Serial.printf("[MOTOR] %d -> %d\n", currentMotorValue, motorValue);
         }
+        currentMotorValue = (uint8_t)motorValue;
+        analogWrite(PWM_PIN, currentMotorValue);
+        applyServoFromMotorValue(currentMotorValue);
+
+        if (tcpClient.connected()) {
+          char tcpMsg[20];
+          snprintf(tcpMsg, sizeof(tcpMsg), "M:%d\n", currentMotorValue);
+          tcpClient.print(tcpMsg);
+        }
+      }
+
+      if (strstr(buffer, "\"getStatus\"") != NULL) {
+        char statusMsg[96];
+        snprintf(statusMsg, sizeof(statusMsg), "{\"motor\":%u,\"nodeConnected\":%s}",
+                 currentMotorValue, tcpClient.connected() ? "true" : "false");
+        client->text(statusMsg);
       }
     }
   }
@@ -224,6 +273,12 @@ void setup() {
   pinMode(PWM_PIN, OUTPUT);
   analogWrite(PWM_PIN, 0);
   Serial.printf("[PWM] Initialized on GPIO%d\n", PWM_PIN);
+
+  // UART-Servo (SC09) initialisieren: TX=GPIO21, RX=GPIO20
+  Serial1.begin(SERVO_BAUD, SERIAL_8N1, SERVO_UART_RX_PIN, SERVO_UART_TX_PIN);
+  scServo.pSerial = &Serial1;
+  delay(100);
+  applyServoFromMotorValue(currentMotorValue);
 
   // WiFi Access Point starten
   WiFi.mode(WIFI_AP);
@@ -266,6 +321,13 @@ void loop() {
       String line = tcpClient.readStringUntil('\n');
       Serial.printf("[TCP RX] %s\n", line.c_str());
     }
+  }
+
+  // Kontinuierliche Servo-Ansteuerung (periodisches Refresh)
+  static unsigned long lastServoUpdate = 0;
+  if (millis() - lastServoUpdate >= 50) {  // Alle 50ms
+    applyServoFromMotorValue(currentMotorValue);
+    lastServoUpdate = millis();
   }
 
   delay(10);

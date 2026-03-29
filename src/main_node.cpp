@@ -74,6 +74,7 @@ void loop() {
           Serial.printf("[MOTOR] Set to %d\n", currentMotorValue);
         }
       }
+
     }
   }
 
