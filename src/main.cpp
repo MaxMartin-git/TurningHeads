@@ -7,7 +7,8 @@
 const char* WIFI_SSID = "TurningHeads";
 const char* WIFI_PASS = "12345";
 const uint16_t TCP_PORT = 5000;
-const uint16_t PWM_PIN = 3;  // PWM für Motor an GPIO3
+const uint16_t MOTOR_PWM_PIN = 3;  // PWM-Eingang am Motortreiber
+const uint16_t MOTOR_DIR_PIN = 4;  // DIR-Eingang am Motortreiber
 const uint8_t PWM_CHANNEL = 0;
 const uint16_t PWM_FREQ = 1000;  // Hz
 const uint8_t PWM_RESOLUTION = 8;  // 8-bit = 0..255
@@ -24,8 +25,9 @@ AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 WiFiServer tcpServer(TCP_PORT);
 WiFiClient tcpClient;
-uint8_t currentMotorValue = 0;  // Aktueller PWM-Wert für Motor (0..255)
-uint8_t currentServoAngle = 90; // Aktueller Servo-Winkel (0..180)
+uint8_t currentMotorPwm = 0;    // 0..255
+uint8_t currentMotorDir = 0;    // 0=CW, 1=CCW
+uint8_t currentServoValue = 128; // 0..255 (UI-Wert)
 SCSCL scServo;
 
 // ============ HILFSFUNKTION: HTML/CSS/JS WEB-UI ============
@@ -35,7 +37,13 @@ const char* getWebPage() {
 <html>
 <head>
   <title>TurningHeads Control</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <style>
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+    }
     body {
       font-family: Arial, sans-serif;
       max-width: 600px;
@@ -108,9 +116,19 @@ const char* getWebPage() {
   <div class="container">
     <h1>🎮 TurningHeads</h1>
     
-    <label>Motor Speed</label>
+    <label>Servo Position (0..255)</label>
+    <input type="range" id="servoSlider" min="0" max="255" value="128">
+    <div id="servoValue">128</div>
+
+    <label>DC Motor PWM (0..255)</label>
     <input type="range" id="motorSlider" min="0" max="255" value="0">
-    <div id="value">0</div>
+    <div id="motorValue">0</div>
+
+    <label>DC Motor Richtung</label>
+    <div>
+      <button id="dirCw" type="button">CW</button>
+      <button id="dirCcw" type="button">CCW</button>
+    </div>
 
     <div id="status">
       <div>WebSocket: <span id="wsStatus" class="status-error">Disconnected</span></div>
@@ -121,19 +139,32 @@ const char* getWebPage() {
   <script>
     // === WebSocket Verbindung ===
     const ws = new WebSocket('ws://' + window.location.host + '/ws');
-    const slider = document.getElementById('motorSlider');
-    const valueDisplay = document.getElementById('value');
+    const servoSlider = document.getElementById('servoSlider');
+    const servoValue = document.getElementById('servoValue');
+    const motorSlider = document.getElementById('motorSlider');
+    const motorValue = document.getElementById('motorValue');
+    const dirCw = document.getElementById('dirCw');
+    const dirCcw = document.getElementById('dirCcw');
     const wsStatus = document.getElementById('wsStatus');
     const nodeStatus = document.getElementById('nodeStatus');
+    let currentDir = 0;
 
-    function sendMotorState(value) {
+    function sendControlState() {
       if (ws.readyState !== WebSocket.OPEN) {
         return;
       }
 
       ws.send(JSON.stringify({
-        motor: value
+        servo: parseInt(servoSlider.value, 10),
+        motorPwm: parseInt(motorSlider.value, 10),
+        motorDir: currentDir
       }));
+    }
+
+    function setDirButtons(dir) {
+      currentDir = dir;
+      dirCw.style.background = dir === 0 ? '#4CAF50' : '#555';
+      dirCcw.style.background = dir === 1 ? '#4CAF50' : '#555';
     }
 
     // WebSocket verbunden
@@ -153,7 +184,7 @@ const char* getWebPage() {
     // WebSocket Daten empfangen (Status vom Coordinator)
     ws.onmessage = function(event) {
       const data = JSON.parse(event.data);
-      // Server schickt Status zurück, z.B. {"motor": 123, "nodeConnected": true}
+      // Server schickt Status zurück
       if (data.nodeConnected) {
         nodeStatus.textContent = 'Connected';
         nodeStatus.className = 'status-ok';
@@ -162,37 +193,84 @@ const char* getWebPage() {
         nodeStatus.className = 'status-error';
       }
 
-      if (typeof data.motor === 'number') {
-        slider.value = data.motor;
-        valueDisplay.textContent = data.motor;
+      if (typeof data.servo === 'number') {
+        servoSlider.value = data.servo;
+        servoValue.textContent = data.servo;
+      }
+
+      if (typeof data.motorPwm === 'number') {
+        motorSlider.value = data.motorPwm;
+        motorValue.textContent = data.motorPwm;
+      }
+
+      if (typeof data.motorDir === 'number') {
+        setDirButtons(data.motorDir);
       }
     };
 
-    // Slider-Event: Live Motor-Wert senden
-    slider.addEventListener('input', function() {
-      const motorValue = parseInt(slider.value, 10);
-      valueDisplay.textContent = motorValue;
-      sendMotorState(motorValue);
+    servoSlider.addEventListener('input', function() {
+      servoValue.textContent = servoSlider.value;
+      sendControlState();
+    });
+
+    motorSlider.addEventListener('input', function() {
+      motorValue.textContent = motorSlider.value;
+      sendControlState();
+    });
+
+    dirCw.addEventListener('click', function() {
+      setDirButtons(0);
+      sendControlState();
+    });
+
+    dirCcw.addEventListener('click', function() {
+      setDirButtons(1);
+      sendControlState();
     });
 
     // Optional: Initial-Status abfragen
     window.addEventListener('load', function() {
+      setDirButtons(0);
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({cmd: 'getStatus'}));
       }
     });
+
+    // Seite gegen Touch-Scroll sperren, Slider-Bewegung aber erlauben
+    document.addEventListener('touchmove', function(event) {
+      if (!event.target.closest('input[type="range"]')) {
+        event.preventDefault();
+      }
+    }, { passive: false });
   </script>
 </body>
 </html>
 )rawliteral";
 }
 
-void applyServoFromMotorValue(uint8_t motorValue) {
+void applyServoFromUiValue(uint8_t servoValue) {
   // Direkt mapping: 0..255 -> 0..1023
-  uint16_t targetPos = (uint16_t)(motorValue * 1023 / 255);
+  uint16_t targetPos = (uint16_t)(servoValue * 1023 / 255);
   scServo.WritePos(SERVO_ID, targetPos, 0, SERVO_SPEED);
-  currentServoAngle = motorValue;  // Vereinfacht: direkt kopieren
-  // Debug-Ausgabe entfernt (war alle 50ms!)
+  currentServoValue = servoValue;
+}
+
+void applyDcMotorDriver(uint8_t pwmValue, uint8_t dirValue) {
+  currentMotorPwm = pwmValue;
+  currentMotorDir = dirValue ? 1 : 0;
+
+  // Wahrheitstabelle:
+  // PWM=Low -> Brake (DIR don't care)
+  // PWM=High + DIR=Low -> CW
+  // PWM=High + DIR=High -> CCW
+  if (currentMotorPwm == 0) {
+    digitalWrite(MOTOR_DIR_PIN, LOW);
+    analogWrite(MOTOR_PWM_PIN, 0);
+    return;
+  }
+
+  digitalWrite(MOTOR_DIR_PIN, currentMotorDir == 0 ? LOW : HIGH);
+  analogWrite(MOTOR_PWM_PIN, currentMotorPwm);
 }
 
 bool parseJsonIntInRange(const char* buffer, const char* key, int minVal, int maxVal, int* outValue) {
@@ -237,26 +315,47 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
       
       Serial.printf("[WS] Received: %s\n", buffer);
 
-      int motorValue = -1;
-      if (parseJsonIntInRange(buffer, "motor", 0, 255, &motorValue)) {
-        if ((uint8_t)motorValue != currentMotorValue) {  // Nur bei Änderung ausgeben
-          Serial.printf("[MOTOR] %d -> %d\n", currentMotorValue, motorValue);
+      int servoValue = -1;
+      if (parseJsonIntInRange(buffer, "servo", 0, 255, &servoValue)) {
+        if ((uint8_t)servoValue != currentServoValue) {
+          Serial.printf("[SERVO] %u -> %d\n", currentServoValue, servoValue);
+          applyServoFromUiValue((uint8_t)servoValue);
         }
-        currentMotorValue = (uint8_t)motorValue;
-        analogWrite(PWM_PIN, currentMotorValue);
-        applyServoFromMotorValue(currentMotorValue);
+      }
+
+      int newMotorPwm = currentMotorPwm;
+      int newMotorDir = currentMotorDir;
+      bool motorChanged = false;
+      int parsedMotorPwm = -1;
+      int parsedMotorDir = -1;
+
+      if (parseJsonIntInRange(buffer, "motorPwm", 0, 255, &parsedMotorPwm)) {
+        newMotorPwm = parsedMotorPwm;
+        motorChanged = true;
+      }
+      if (parseJsonIntInRange(buffer, "motorDir", 0, 1, &parsedMotorDir)) {
+        newMotorDir = parsedMotorDir;
+        motorChanged = true;
+      }
+
+      if (motorChanged) {
+        if ((uint8_t)newMotorPwm != currentMotorPwm || (uint8_t)newMotorDir != currentMotorDir) {
+          Serial.printf("[MOTOR] PWM=%d DIR=%d\n", newMotorPwm, newMotorDir);
+        }
+        applyDcMotorDriver((uint8_t)newMotorPwm, (uint8_t)newMotorDir);
 
         if (tcpClient.connected()) {
           char tcpMsg[20];
-          snprintf(tcpMsg, sizeof(tcpMsg), "M:%d\n", currentMotorValue);
+          snprintf(tcpMsg, sizeof(tcpMsg), "M:%d\n", currentMotorPwm);
           tcpClient.print(tcpMsg);
         }
       }
 
       if (strstr(buffer, "\"getStatus\"") != NULL) {
-        char statusMsg[96];
-        snprintf(statusMsg, sizeof(statusMsg), "{\"motor\":%u,\"nodeConnected\":%s}",
-                 currentMotorValue, tcpClient.connected() ? "true" : "false");
+        char statusMsg[140];
+        snprintf(statusMsg, sizeof(statusMsg), "{\"servo\":%u,\"motorPwm\":%u,\"motorDir\":%u,\"nodeConnected\":%s}",
+                 currentServoValue, currentMotorPwm, currentMotorDir,
+                 tcpClient.connected() ? "true" : "false");
         client->text(statusMsg);
       }
     }
@@ -269,16 +368,17 @@ void setup() {
   delay(500);
   Serial.println("\n\n=== TurningHeads Coordinator ===");
 
-  // PWM für Motor initialisieren
-  pinMode(PWM_PIN, OUTPUT);
-  analogWrite(PWM_PIN, 0);
-  Serial.printf("[PWM] Initialized on GPIO%d\n", PWM_PIN);
+  // Motortreiber-Eingänge initialisieren
+  pinMode(MOTOR_PWM_PIN, OUTPUT);
+  pinMode(MOTOR_DIR_PIN, OUTPUT);
+  applyDcMotorDriver(0, 0);
+  Serial.printf("[MOTOR] PWM GPIO%d, DIR GPIO%d\n", MOTOR_PWM_PIN, MOTOR_DIR_PIN);
 
   // UART-Servo (SC09) initialisieren: TX=GPIO21, RX=GPIO20
   Serial1.begin(SERVO_BAUD, SERIAL_8N1, SERVO_UART_RX_PIN, SERVO_UART_TX_PIN);
   scServo.pSerial = &Serial1;
   delay(100);
-  applyServoFromMotorValue(currentMotorValue);
+  applyServoFromUiValue(currentServoValue);
 
   // WiFi Access Point starten
   WiFi.mode(WIFI_AP);
@@ -326,7 +426,7 @@ void loop() {
   // Kontinuierliche Servo-Ansteuerung (periodisches Refresh)
   static unsigned long lastServoUpdate = 0;
   if (millis() - lastServoUpdate >= 50) {  // Alle 50ms: weniger UART-Last, gleiches Fahrgefühl
-    applyServoFromMotorValue(currentMotorValue);
+    applyServoFromUiValue(currentServoValue);
     lastServoUpdate = millis();
   }
 
