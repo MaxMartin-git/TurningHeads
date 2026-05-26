@@ -15,9 +15,14 @@ const uint8_t PWM_RESOLUTION = 8;  // 8-bit = 0..255
 const uint8_t SERVO_UART_TX_PIN = 21;
 const uint8_t SERVO_UART_RX_PIN = 20;
 const uint32_t SERVO_BAUD = 1000000;  // SC09 braucht 1 Mbps
-const uint8_t SERVO_ID = 1;
+const uint8_t SERVO_VERTICAL_ID = 1;
+const uint8_t SERVO_HORIZONTAL_ID = 2;
+const int16_t SERVO_UI_MIN = -100;
+const int16_t SERVO_UI_MAX = 100;
 const uint16_t SERVO_POS_MIN = 0;
 const uint16_t SERVO_POS_MAX = 1023;
+const uint16_t SERVO_POS_CENTER = 512;
+const uint16_t SERVO_POS_TRAVEL = 360;
 const uint16_t SERVO_SPEED = 4095;  // Explicit max speed (stable setting)
 
 // ============ GLOBALE VARIABLEN ============
@@ -27,7 +32,8 @@ WiFiServer tcpServer(TCP_PORT);
 WiFiClient tcpClient;
 uint8_t currentMotorPwm = 0;    // 0..255
 uint8_t currentMotorDir = 0;    // 0=CW, 1=CCW
-uint8_t currentServoValue = 128; // 0..255 (UI-Wert)
+int16_t currentServoVerticalValue = 0;    // -100..100, 0 = Mitte
+int16_t currentServoHorizontalValue = 0;  // -100..100, 0 = Mitte
 SCSCL scServo;
 
 // ============ HILFSFUNKTION: HTML/CSS/JS WEB-UI ============
@@ -116,9 +122,13 @@ const char* getWebPage() {
   <div class="container">
     <h1>🎮 TurningHeads</h1>
     
-    <label>Servo Position (0..255)</label>
-    <input type="range" id="servoSlider" min="0" max="255" value="128">
-    <div id="servoValue">128</div>
+    <label>Servo Vertikal (-100..100)</label>
+    <input type="range" id="servoVerticalSlider" min="-100" max="100" value="0">
+    <div id="servoVerticalValue">0</div>
+
+    <label>Servo Horizontal (-100..100)</label>
+    <input type="range" id="servoHorizontalSlider" min="-100" max="100" value="0">
+    <div id="servoHorizontalValue">0</div>
 
     <label>DC Motor PWM (0..255)</label>
     <input type="range" id="motorSlider" min="0" max="255" value="0">
@@ -139,8 +149,10 @@ const char* getWebPage() {
   <script>
     // === WebSocket Verbindung ===
     const ws = new WebSocket('ws://' + window.location.host + '/ws');
-    const servoSlider = document.getElementById('servoSlider');
-    const servoValue = document.getElementById('servoValue');
+    const servoVerticalSlider = document.getElementById('servoVerticalSlider');
+    const servoVerticalValue = document.getElementById('servoVerticalValue');
+    const servoHorizontalSlider = document.getElementById('servoHorizontalSlider');
+    const servoHorizontalValue = document.getElementById('servoHorizontalValue');
     const motorSlider = document.getElementById('motorSlider');
     const motorValue = document.getElementById('motorValue');
     const dirCw = document.getElementById('dirCw');
@@ -155,7 +167,8 @@ const char* getWebPage() {
       }
 
       ws.send(JSON.stringify({
-        servo: parseInt(servoSlider.value, 10),
+        servoVertical: parseInt(servoVerticalSlider.value, 10),
+        servoHorizontal: parseInt(servoHorizontalSlider.value, 10),
         motorPwm: parseInt(motorSlider.value, 10),
         motorDir: currentDir
       }));
@@ -193,9 +206,14 @@ const char* getWebPage() {
         nodeStatus.className = 'status-error';
       }
 
-      if (typeof data.servo === 'number') {
-        servoSlider.value = data.servo;
-        servoValue.textContent = data.servo;
+      if (typeof data.servoVertical === 'number') {
+        servoVerticalSlider.value = data.servoVertical;
+        servoVerticalValue.textContent = data.servoVertical;
+      }
+
+      if (typeof data.servoHorizontal === 'number') {
+        servoHorizontalSlider.value = data.servoHorizontal;
+        servoHorizontalValue.textContent = data.servoHorizontal;
       }
 
       if (typeof data.motorPwm === 'number') {
@@ -208,8 +226,13 @@ const char* getWebPage() {
       }
     };
 
-    servoSlider.addEventListener('input', function() {
-      servoValue.textContent = servoSlider.value;
+    servoVerticalSlider.addEventListener('input', function() {
+      servoVerticalValue.textContent = servoVerticalSlider.value;
+      sendControlState();
+    });
+
+    servoHorizontalSlider.addEventListener('input', function() {
+      servoHorizontalValue.textContent = servoHorizontalSlider.value;
       sendControlState();
     });
 
@@ -231,6 +254,8 @@ const char* getWebPage() {
     // Optional: Initial-Status abfragen
     window.addEventListener('load', function() {
       setDirButtons(0);
+      servoVerticalValue.textContent = servoVerticalSlider.value;
+      servoHorizontalValue.textContent = servoHorizontalSlider.value;
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({cmd: 'getStatus'}));
       }
@@ -248,11 +273,24 @@ const char* getWebPage() {
 )rawliteral";
 }
 
-void applyServoFromUiValue(uint8_t servoValue) {
-  // Direkt mapping: 0..255 -> 0..1023
-  uint16_t targetPos = (uint16_t)(servoValue * 1023 / 255);
-  scServo.WritePos(SERVO_ID, targetPos, 0, SERVO_SPEED);
-  currentServoValue = servoValue;
+uint16_t mapServoUiValueToTargetPos(int16_t servoUiValue) {
+  int16_t clampedValue = constrain(servoUiValue, SERVO_UI_MIN, SERVO_UI_MAX);
+  int32_t targetPos = SERVO_POS_CENTER + ((int32_t)clampedValue * (int32_t)SERVO_POS_TRAVEL) / SERVO_UI_MAX;
+
+  if (targetPos < SERVO_POS_MIN) {
+    targetPos = SERVO_POS_MIN;
+  }
+  if (targetPos > SERVO_POS_MAX) {
+    targetPos = SERVO_POS_MAX;
+  }
+
+  return (uint16_t)targetPos;
+}
+
+void applyServoFromUiValue(int16_t servoUiValue, uint8_t servoId, int16_t &currentServoValue) {
+  uint16_t targetPos = mapServoUiValueToTargetPos(servoUiValue);
+  scServo.WritePos(servoId, targetPos, 0, SERVO_SPEED);
+  currentServoValue = constrain(servoUiValue, SERVO_UI_MIN, SERVO_UI_MAX);
 }
 
 void applyDcMotorDriver(uint8_t pwmValue, uint8_t dirValue) {
@@ -315,12 +353,26 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
       
       Serial.printf("[WS] Received: %s\n", buffer);
 
-      int servoValue = -1;
-      if (parseJsonIntInRange(buffer, "servo", 0, 255, &servoValue)) {
-        if ((uint8_t)servoValue != currentServoValue) {
-          Serial.printf("[SERVO] %u -> %d\n", currentServoValue, servoValue);
-          applyServoFromUiValue((uint8_t)servoValue);
-        }
+      int servoVerticalValue = currentServoVerticalValue;
+      int servoHorizontalValue = currentServoHorizontalValue;
+      bool servoVerticalChanged = false;
+      bool servoHorizontalChanged = false;
+
+      if (parseJsonIntInRange(buffer, "servoVertical", SERVO_UI_MIN, SERVO_UI_MAX, &servoVerticalValue)) {
+        servoVerticalChanged = true;
+      }
+      if (parseJsonIntInRange(buffer, "servoHorizontal", SERVO_UI_MIN, SERVO_UI_MAX, &servoHorizontalValue)) {
+        servoHorizontalChanged = true;
+      }
+
+      if (servoVerticalChanged && servoVerticalValue != currentServoVerticalValue) {
+        Serial.printf("[SERVO V] %d -> %d\n", currentServoVerticalValue, servoVerticalValue);
+        applyServoFromUiValue((int16_t)servoVerticalValue, SERVO_VERTICAL_ID, currentServoVerticalValue);
+      }
+
+      if (servoHorizontalChanged && servoHorizontalValue != currentServoHorizontalValue) {
+        Serial.printf("[SERVO H] %d -> %d\n", currentServoHorizontalValue, servoHorizontalValue);
+        applyServoFromUiValue((int16_t)servoHorizontalValue, SERVO_HORIZONTAL_ID, currentServoHorizontalValue);
       }
 
       int newMotorPwm = currentMotorPwm;
@@ -353,8 +405,8 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 
       if (strstr(buffer, "\"getStatus\"") != NULL) {
         char statusMsg[140];
-        snprintf(statusMsg, sizeof(statusMsg), "{\"servo\":%u,\"motorPwm\":%u,\"motorDir\":%u,\"nodeConnected\":%s}",
-                 currentServoValue, currentMotorPwm, currentMotorDir,
+        snprintf(statusMsg, sizeof(statusMsg), "{\"servoVertical\":%d,\"servoHorizontal\":%d,\"motorPwm\":%u,\"motorDir\":%u,\"nodeConnected\":%s}",
+                 currentServoVerticalValue, currentServoHorizontalValue, currentMotorPwm, currentMotorDir,
                  tcpClient.connected() ? "true" : "false");
         client->text(statusMsg);
       }
@@ -378,7 +430,9 @@ void setup() {
   Serial1.begin(SERVO_BAUD, SERIAL_8N1, SERVO_UART_RX_PIN, SERVO_UART_TX_PIN);
   scServo.pSerial = &Serial1;
   delay(100);
-  applyServoFromUiValue(currentServoValue);
+  applyServoFromUiValue(currentServoVerticalValue, SERVO_VERTICAL_ID, currentServoVerticalValue);
+  applyServoFromUiValue(currentServoHorizontalValue, SERVO_HORIZONTAL_ID, currentServoHorizontalValue);
+  Serial.printf("[SERVO] Vertical ID %u, Horizontal ID %u\n", SERVO_VERTICAL_ID, SERVO_HORIZONTAL_ID);
 
   // WiFi Access Point starten
   WiFi.mode(WIFI_AP);
@@ -426,7 +480,8 @@ void loop() {
   // Kontinuierliche Servo-Ansteuerung (periodisches Refresh)
   static unsigned long lastServoUpdate = 0;
   if (millis() - lastServoUpdate >= 50) {  // Alle 50ms: weniger UART-Last, gleiches Fahrgefühl
-    applyServoFromUiValue(currentServoValue);
+    applyServoFromUiValue(currentServoVerticalValue, SERVO_VERTICAL_ID, currentServoVerticalValue);
+    applyServoFromUiValue(currentServoHorizontalValue, SERVO_HORIZONTAL_ID, currentServoHorizontalValue);
     lastServoUpdate = millis();
   }
 
