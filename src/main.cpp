@@ -256,6 +256,7 @@ const char* getWebPage() {
       setDirButtons(0);
       servoVerticalValue.textContent = servoVerticalSlider.value;
       servoHorizontalValue.textContent = servoHorizontalSlider.value;
+      motorValue.textContent = motorSlider.value;
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({cmd: 'getStatus'}));
       }
