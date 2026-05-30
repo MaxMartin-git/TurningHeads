@@ -28,6 +28,13 @@ platformio run -e coordinator --target upload
 platformio run -e node --target upload
 ```
 
+### 3. **Servo-Mitte speichern**
+```bash
+platformio run -e servo_center_setter --target upload
+```
+
+Nach dem Flashen den Servo von Hand in die gewünschte Mittelposition bringen, dann einschalten. Das Skript speichert die aktuelle Stellung automatisch beim Start und fährt den Servo dabei nicht an.
+
 Oder in VS Code oben rechts die Umgebung (`[coordinator]` oder `[node]`) wechseln und `Upload` klicken.
 
 ## So funktioniert es
