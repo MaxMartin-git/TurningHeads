@@ -3,19 +3,34 @@
 
 SMS_STS st;
 
+namespace {
+constexpr uint8_t kServoTxPin = 21;
+constexpr uint8_t kServoRxPin = 20;
+constexpr uint32_t kServoBaud = 1000000;
+constexpr uint8_t kServoMinId = 1;
+constexpr uint8_t kServoMaxId = 253;
+}  // namespace
+
 void setup() {
   Serial.begin(115200);
-  while (!Serial) {
-    delay(10);
-  }
-  delay(500);
+
+  Serial1.begin(kServoBaud, SERIAL_8N1, kServoRxPin, kServoTxPin);
+  st.pSerial = &Serial1;
+
   Serial.println();
   Serial.println("=== Servo ID Reader ===");
-  Serial1.begin(1000000, SERIAL_8N1, 20, 21);
-  st.pSerial = &Serial1;
+  Serial.println("Starting scan in 2 seconds...");
+  delay(2000);
+  Serial.printf("Scanning IDs %u..%u at %lu baud on RX=%u TX=%u\n",
+                kServoMinId,
+                kServoMaxId,
+                static_cast<unsigned long>(kServoBaud),
+                kServoRxPin,
+                kServoTxPin);
+
   bool found = false;
 
-  for (int id = 1; id <= 2; id++) {
+  for (int id = kServoMinId; id <= kServoMaxId; id++) {
     if (st.Ping(id) >= 0) {
       Serial.printf("Servo ID: %d\n", id);
       found = true;
@@ -24,7 +39,7 @@ void setup() {
   }
 
   if (!found) {
-    Serial.println("No servo found.");
+    Serial.printf("No servo found in ID range %u..%u.\n", kServoMinId, kServoMaxId);
   }
 }
 

@@ -4,8 +4,8 @@
 #include <SCServo.h>
 
 // ============ KONFIGURATION ============
-const char* WIFI_SSID = "TurningHeads";
-const char* WIFI_PASS = "12345";
+const char* WIFI_SSID = "ESP_TH";
+const char* WIFI_PASS = "TurningHeads123";
 const uint16_t TCP_PORT = 5000;
 const uint16_t MOTOR_PWM_PIN = 3;  // PWM-Eingang am Motortreiber
 const uint16_t MOTOR_DIR_PIN = 4;  // DIR-Eingang am Motortreiber
@@ -17,12 +17,10 @@ const uint8_t SERVO_UART_RX_PIN = 20;
 const uint32_t SERVO_BAUD = 1000000;  // SC09 braucht 1 Mbps
 const uint8_t SERVO_VERTICAL_ID = 1;
 const uint8_t SERVO_HORIZONTAL_ID = 2;
-const int16_t SERVO_UI_MIN = -100;
+const int16_t SERVO_UI_MIN = -200;
 const int16_t SERVO_UI_MAX = 100;
 const uint16_t SERVO_POS_MIN = 0;
 const uint16_t SERVO_POS_MAX = 1023;
-const uint16_t SERVO_POS_CENTER = 512;
-const uint16_t SERVO_POS_TRAVEL = 360;
 const uint16_t SERVO_SPEED = 4095;  // Explicit max speed (stable setting)
 
 // ============ GLOBALE VARIABLEN ============
@@ -35,6 +33,10 @@ uint8_t currentMotorDir = 0;    // 0=CW, 1=CCW
 int16_t currentServoVerticalValue = 0;    // -100..100, 0 = Mitte
 int16_t currentServoHorizontalValue = 0;  // -100..100, 0 = Mitte
 SCSCL scServo;
+// Desired servo positions written by WebSocket handler; actual writes happen in servoTask
+volatile int16_t desiredServoVerticalValue = 0;
+volatile int16_t desiredServoHorizontalValue = 0;
+portMUX_TYPE servoMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ============ HILFSFUNKTION: HTML/CSS/JS WEB-UI ============
 const char* getWebPage() {
@@ -160,18 +162,35 @@ const char* getWebPage() {
     const wsStatus = document.getElementById('wsStatus');
     const nodeStatus = document.getElementById('nodeStatus');
     let currentDir = 0;
+    let controlSendTimer = null;
+    const CONTROL_DEBOUNCE_MS = 80;
+
+    function buildControlState() {
+      return {
+        servoVertical: parseInt(servoVerticalSlider.value, 10),
+        servoHorizontal: parseInt(servoHorizontalSlider.value, 10),
+        motorPwm: parseInt(motorSlider.value, 10),
+        motorDir: currentDir
+      };
+    }
 
     function sendControlState() {
       if (ws.readyState !== WebSocket.OPEN) {
         return;
       }
 
-      ws.send(JSON.stringify({
-        servoVertical: parseInt(servoVerticalSlider.value, 10),
-        servoHorizontal: parseInt(servoHorizontalSlider.value, 10),
-        motorPwm: parseInt(motorSlider.value, 10),
-        motorDir: currentDir
-      }));
+      ws.send(JSON.stringify(buildControlState()));
+    }
+
+    function scheduleControlStateSend() {
+      if (controlSendTimer !== null) {
+        clearTimeout(controlSendTimer);
+      }
+
+      controlSendTimer = setTimeout(function() {
+        controlSendTimer = null;
+        sendControlState();
+      }, CONTROL_DEBOUNCE_MS);
     }
 
     function setDirButtons(dir) {
@@ -228,27 +247,27 @@ const char* getWebPage() {
 
     servoVerticalSlider.addEventListener('input', function() {
       servoVerticalValue.textContent = servoVerticalSlider.value;
-      sendControlState();
+      scheduleControlStateSend();
     });
 
     servoHorizontalSlider.addEventListener('input', function() {
       servoHorizontalValue.textContent = servoHorizontalSlider.value;
-      sendControlState();
+      scheduleControlStateSend();
     });
 
     motorSlider.addEventListener('input', function() {
       motorValue.textContent = motorSlider.value;
-      sendControlState();
+      scheduleControlStateSend();
     });
 
     dirCw.addEventListener('click', function() {
       setDirButtons(0);
-      sendControlState();
+      scheduleControlStateSend();
     });
 
     dirCcw.addEventListener('click', function() {
       setDirButtons(1);
-      sendControlState();
+      scheduleControlStateSend();
     });
 
     // Optional: Initial-Status abfragen
@@ -276,22 +295,56 @@ const char* getWebPage() {
 
 uint16_t mapServoUiValueToTargetPos(int16_t servoUiValue) {
   int16_t clampedValue = constrain(servoUiValue, SERVO_UI_MIN, SERVO_UI_MAX);
-  int32_t targetPos = SERVO_POS_CENTER + ((int32_t)clampedValue * (int32_t)SERVO_POS_TRAVEL) / SERVO_UI_MAX;
-
-  if (targetPos < SERVO_POS_MIN) {
-    targetPos = SERVO_POS_MIN;
-  }
-  if (targetPos > SERVO_POS_MAX) {
-    targetPos = SERVO_POS_MAX;
-  }
-
-  return (uint16_t)targetPos;
+  return (uint16_t)map(clampedValue, SERVO_UI_MIN, SERVO_UI_MAX, SERVO_POS_MIN, SERVO_POS_MAX);
 }
 
 void applyServoFromUiValue(int16_t servoUiValue, uint8_t servoId, int16_t &currentServoValue) {
-  uint16_t targetPos = mapServoUiValueToTargetPos(servoUiValue);
-  scServo.WritePos(servoId, targetPos, 0, SERVO_SPEED);
-  currentServoValue = constrain(servoUiValue, SERVO_UI_MIN, SERVO_UI_MAX);
+  int16_t clampedValue = constrain(servoUiValue, SERVO_UI_MIN, SERVO_UI_MAX);
+
+  if (clampedValue == currentServoValue) {
+    return;
+  }
+
+  // Update current state and desired position for the servo task to process.
+  currentServoValue = clampedValue;
+  portENTER_CRITICAL(&servoMux);
+  if (servoId == SERVO_VERTICAL_ID) {
+    desiredServoVerticalValue = clampedValue;
+  } else if (servoId == SERVO_HORIZONTAL_ID) {
+    desiredServoHorizontalValue = clampedValue;
+  }
+  portEXIT_CRITICAL(&servoMux);
+}
+
+// FreeRTOS task that serializes and throttles SCServo writes to avoid blocking network tasks
+void servoTask(void *pvParameters) {
+  int16_t lastSentVertical = 0x7FFF; // sentinel
+  int16_t lastSentHorizontal = 0x7FFF;
+
+  for (;;) {
+    int16_t wantV;
+    int16_t wantH;
+
+    portENTER_CRITICAL(&servoMux);
+    wantV = desiredServoVerticalValue;
+    wantH = desiredServoHorizontalValue;
+    portEXIT_CRITICAL(&servoMux);
+
+    if (wantV != lastSentVertical) {
+      uint16_t targetPos = mapServoUiValueToTargetPos(wantV);
+      scServo.WritePos(SERVO_VERTICAL_ID, targetPos, 0, SERVO_SPEED);
+      lastSentVertical = wantV;
+    }
+
+    if (wantH != lastSentHorizontal) {
+      uint16_t targetPos = mapServoUiValueToTargetPos(wantH);
+      scServo.WritePos(SERVO_HORIZONTAL_ID, targetPos, 0, SERVO_SPEED);
+      lastSentHorizontal = wantH;
+    }
+
+    // Delay a bit to yield to other tasks and avoid watchdog issues
+    vTaskDelay(pdMS_TO_TICKS(25));
+  }
 }
 
 void applyDcMotorDriver(uint8_t pwmValue, uint8_t dirValue) {
@@ -433,6 +486,8 @@ void setup() {
   delay(100);
   applyServoFromUiValue(currentServoVerticalValue, SERVO_VERTICAL_ID, currentServoVerticalValue);
   applyServoFromUiValue(currentServoHorizontalValue, SERVO_HORIZONTAL_ID, currentServoHorizontalValue);
+  // Start servo task to handle actual SCServo writes outside network/event context
+  xTaskCreatePinnedToCore(servoTask, "servoTask", 4096, NULL, 1, NULL, 0);
   Serial.printf("[SERVO] Vertical ID %u, Horizontal ID %u\n", SERVO_VERTICAL_ID, SERVO_HORIZONTAL_ID);
 
   // WiFi Access Point starten
@@ -476,14 +531,6 @@ void loop() {
       String line = tcpClient.readStringUntil('\n');
       Serial.printf("[TCP RX] %s\n", line.c_str());
     }
-  }
-
-  // Kontinuierliche Servo-Ansteuerung (periodisches Refresh)
-  static unsigned long lastServoUpdate = 0;
-  if (millis() - lastServoUpdate >= 50) {  // Alle 50ms: weniger UART-Last, gleiches Fahrgefühl
-    applyServoFromUiValue(currentServoVerticalValue, SERVO_VERTICAL_ID, currentServoVerticalValue);
-    applyServoFromUiValue(currentServoHorizontalValue, SERVO_HORIZONTAL_ID, currentServoHorizontalValue);
-    lastServoUpdate = millis();
   }
 
   delay(10);

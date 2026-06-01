@@ -3,7 +3,7 @@
 
 // ============ KONFIGURATION ============
 const char* WIFI_SSID = "TurningHeads";      // Muss gleich wie Coordinator sein
-const char* WIFI_PASS = "12345";             // Muss gleich wie Coordinator sein
+const char* WIFI_PASS = "TurningHeads123";   // Muss gleich wie Coordinator sein
 const char* COORDINATOR_IP = "192.168.4.1";  // Standard IP des Coordinators
 const uint16_t COORDINATOR_PORT = 5000;      // Muss gleich wie Coordinator sein
 const uint16_t PWM_PIN = 3;                  // PWM fuer Motor an GPIO3
