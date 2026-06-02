@@ -166,7 +166,6 @@ const char* getWebPage() {
     let controlSendTimer = null;
     let statusSynced = false;
     let controlStateDirty = false;
-    const CONTROL_DEBOUNCE_MS = 80;
 
     function buildControlState() {
       return {
@@ -186,14 +185,8 @@ const char* getWebPage() {
     }
 
     function scheduleControlStateSend() {
-      if (controlSendTimer !== null) {
-        clearTimeout(controlSendTimer);
-      }
-
-      controlSendTimer = setTimeout(function() {
-        controlSendTimer = null;
-        sendControlState();
-      }, CONTROL_DEBOUNCE_MS);
+      sendControlState();
+      controlStateDirty = false;
     }
 
     function setDirButtons(dir) {
@@ -366,42 +359,20 @@ void servoTask(void *pvParameters) {
 
     if (wantUpdown != lastSentUpdown) {
       uint16_t targetPos = offsetServoValueToTargetPos(wantUpdown, updown_pos_limit);
-      int lastPosRead = readServoCurrentPosition(SERVO_UPDOWN_ID);
-      if (lastPosRead >= 0) {
-        Serial.printf("[SERVO UPDOWN] last pos read=%d bits, current pos command=%u bits\n", lastPosRead, targetPos);
-      } else {
-        Serial.printf("[SERVO UPDOWN] last pos read=read_error, current pos command=%u bits\n", targetPos);
-      }
       scServo.WritePos(SERVO_UPDOWN_ID, targetPos, 0, SERVO_SPEED);
-      int currentPosRead = readServoCurrentPosition(SERVO_UPDOWN_ID);
-      if (currentPosRead >= 0) {
-        Serial.printf("[SERVO UPDOWN] current pos read=%d bits\n", currentPosRead);
-      } else {
-        Serial.println("[SERVO UPDOWN] current pos read=read_error");
-      }
+      Serial.printf("[SERVO UPDOWN] command=%u bits\n", targetPos);
       lastSentUpdown = wantUpdown;
     }
 
     if (wantLateral != lastSentLateral) {
       uint16_t targetPos = offsetServoValueToTargetPos(wantLateral, lateral_pos_limit);
-      int lastPosRead = readServoCurrentPosition(SERVO_LATERAL_ID);
-      if (lastPosRead >= 0) {
-        Serial.printf("[SERVO LATERAL] last pos read=%d bits, current pos command=%u bits\n", lastPosRead, targetPos);
-      } else {
-        Serial.printf("[SERVO LATERAL] last pos read=read_error, current pos command=%u bits\n", targetPos);
-      }
       scServo.WritePos(SERVO_LATERAL_ID, targetPos, 0, SERVO_SPEED);
-      int currentPosRead = readServoCurrentPosition(SERVO_LATERAL_ID);
-      if (currentPosRead >= 0) {
-        Serial.printf("[SERVO LATERAL] current pos read=%d bits\n", currentPosRead);
-      } else {
-        Serial.println("[SERVO LATERAL] current pos read=read_error");
-      }
+      Serial.printf("[SERVO LATERAL] command=%u bits\n", targetPos);
       lastSentLateral = wantLateral;
     }
 
     // Delay a bit to yield to other tasks and avoid watchdog issues
-    vTaskDelay(pdMS_TO_TICKS(25));
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
 
