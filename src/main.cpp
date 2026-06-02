@@ -71,44 +71,57 @@ const char* getWebPage() {
       border-radius: 10px;
       box-shadow: 0 0 10px rgba(0,0,0,0.5);
     }
-    label {
-      display: block;
+    .joystick-panel {
       margin: 20px 0 10px;
+    }
+    .joystick-readout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 12px;
       font-weight: bold;
     }
-    input[type="range"] {
-      width: 100%;
-      height: 10px;
-      border-radius: 5px;
-      background: #555;
-      outline: none;
-      -webkit-appearance: none;
+    .joystick-readout div {
+      background: #2a2a2a;
+      border: 1px solid #4b4b4b;
+      border-radius: 8px;
+      padding: 10px 12px;
     }
-    input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 20px;
-      height: 20px;
+    .joystick-pad {
+      position: relative;
+      width: min(72vw, 280px);
+      aspect-ratio: 1 / 1;
+      margin: 0 auto;
+      border-radius: 18px;
+      border: 1px solid #555;
+      background:
+        radial-gradient(circle at center, rgba(76, 175, 80, 0.16), transparent 45%),
+        linear-gradient(90deg, transparent 49.5%, rgba(255,255,255,0.12) 50%, transparent 50.5%),
+        linear-gradient(0deg, transparent 49.5%, rgba(255,255,255,0.12) 50%, transparent 50.5%),
+        #1f1f1f;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .joystick-thumb {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 54px;
+      height: 54px;
+      margin-left: -27px;
+      margin-top: -27px;
       border-radius: 50%;
-      background: #4CAF50;
-      cursor: pointer;
+      background: radial-gradient(circle at 30% 30%, #7ae57e, #2d9f3b 55%, #1b6f28 100%);
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+      transform: translate(0px, 0px);
+      transition: transform 40ms linear;
+      pointer-events: none;
     }
-    input[type="range"]::-moz-range-thumb {
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      background: #4CAF50;
-      cursor: pointer;
-      border: none;
-    }
-    #value {
-      display: inline-block;
-      background: #4CAF50;
-      padding: 10px 20px;
-      border-radius: 5px;
+    .joystick-hint {
       margin-top: 10px;
-      font-weight: bold;
-      min-width: 60px;
+      color: #bdbdbd;
+      font-size: 13px;
     }
     #status {
       margin-top: 20px;
@@ -125,13 +138,16 @@ const char* getWebPage() {
   <div class="container">
     <h1>🎮 TurningHeads</h1>
     
-    <label>Servo Updown (-140..140)</label>
-    <input type="range" id="servoUpdownSlider" min="-140" max="140" value="0">
-    <div id="servoUpdownValue">0</div>
-
-    <label>Servo Lateral (-80..80)</label>
-    <input type="range" id="servoLateralSlider" min="-80" max="80" value="0">
-    <div id="servoLateralValue">0</div>
+    <div class="joystick-panel">
+      <div class="joystick-readout">
+        <div>Updown: <span id="servoUpdownValue">0</span></div>
+        <div>Lateral: <span id="servoLateralValue">0</span></div>
+      </div>
+      <div id="joystickPad" class="joystick-pad" aria-label="Servo joystick">
+        <div id="joystickThumb" class="joystick-thumb"></div>
+      </div>
+      <div class="joystick-hint">Drag to set both axes. Position stays where you leave it.</div>
+    </div>
 
     <label>DC Motor PWM (0..255)</label>
     <input type="range" id="motorSlider" min="0" max="255" value="0">
@@ -152,25 +168,72 @@ const char* getWebPage() {
   <script>
     // === WebSocket Verbindung ===
     const ws = new WebSocket('ws://' + window.location.host + '/ws');
-    const servoUpdownSlider = document.getElementById('servoUpdownSlider');
     const servoUpdownValue = document.getElementById('servoUpdownValue');
-    const servoLateralSlider = document.getElementById('servoLateralSlider');
     const servoLateralValue = document.getElementById('servoLateralValue');
+    const joystickPad = document.getElementById('joystickPad');
+    const joystickThumb = document.getElementById('joystickThumb');
     const motorSlider = document.getElementById('motorSlider');
     const motorValue = document.getElementById('motorValue');
     const dirCw = document.getElementById('dirCw');
     const dirCcw = document.getElementById('dirCcw');
     const wsStatus = document.getElementById('wsStatus');
     const nodeStatus = document.getElementById('nodeStatus');
+    const UPDOWN_LIMIT = 140;
+    const LATERAL_LIMIT = 80;
     let currentDir = 0;
+    let currentServoUpdown = 0;
+    let currentServoLateral = 0;
     let controlSendTimer = null;
     let statusSynced = false;
     let controlStateDirty = false;
 
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function syncJoystickReadout() {
+      servoUpdownValue.textContent = currentServoUpdown;
+      servoLateralValue.textContent = currentServoLateral;
+    }
+
+    function renderJoystickThumb() {
+      const rect = joystickPad.getBoundingClientRect();
+      const thumbSize = joystickThumb.offsetWidth || 54;
+      const xRange = Math.max(0, rect.width / 2 - thumbSize / 2);
+      const yRange = Math.max(0, rect.height / 2 - thumbSize / 2);
+      const xOffset = clamp(currentServoLateral / LATERAL_LIMIT, -1, 1) * xRange;
+      const yOffset = clamp(-currentServoUpdown / UPDOWN_LIMIT, -1, 1) * yRange;
+      joystickThumb.style.transform = `translate(${xOffset}px, ${yOffset}px)`;
+    }
+
+    function setJoystickValues(updown, lateral, shouldSend) {
+      currentServoUpdown = clamp(parseInt(updown, 10) || 0, -UPDOWN_LIMIT, UPDOWN_LIMIT);
+      currentServoLateral = clamp(parseInt(lateral, 10) || 0, -LATERAL_LIMIT, LATERAL_LIMIT);
+      syncJoystickReadout();
+      renderJoystickThumb();
+
+      if (shouldSend) {
+        controlStateDirty = true;
+        if (statusSynced) {
+          scheduleControlStateSend();
+        }
+      }
+    }
+
+    function updateJoystickFromPointer(clientX, clientY, shouldSend) {
+      const rect = joystickPad.getBoundingClientRect();
+      const xHalf = Math.max(1, rect.width / 2);
+      const yHalf = Math.max(1, rect.height / 2);
+      const xNorm = clamp((clientX - (rect.left + xHalf)) / xHalf, -1, 1);
+      const yNorm = clamp((clientY - (rect.top + yHalf)) / yHalf, -1, 1);
+
+      setJoystickValues(Math.round(-yNorm * UPDOWN_LIMIT), Math.round(xNorm * LATERAL_LIMIT), shouldSend);
+    }
+
     function buildControlState() {
       return {
-        servoUpdown: parseInt(servoUpdownSlider.value, 10),
-        servoLateral: parseInt(servoLateralSlider.value, 10),
+        servoUpdown: currentServoUpdown,
+        servoLateral: currentServoLateral,
         motorPwm: parseInt(motorSlider.value, 10),
         motorDir: currentDir
       };
@@ -222,14 +285,12 @@ const char* getWebPage() {
         nodeStatus.className = 'status-error';
       }
 
-          if (typeof data.servoUpdown === 'number') {
-            servoUpdownSlider.value = data.servoUpdown;
-            servoUpdownValue.textContent = data.servoUpdown;
-          }
-
-          if (typeof data.servoLateral === 'number') {
-            servoLateralSlider.value = data.servoLateral;
-            servoLateralValue.textContent = data.servoLateral;
+          if (typeof data.servoUpdown === 'number' || typeof data.servoLateral === 'number') {
+            setJoystickValues(
+              typeof data.servoUpdown === 'number' ? data.servoUpdown : currentServoUpdown,
+              typeof data.servoLateral === 'number' ? data.servoLateral : currentServoLateral,
+              false
+            );
       }
 
       if (typeof data.motorPwm === 'number') {
@@ -246,22 +307,6 @@ const char* getWebPage() {
         scheduleControlStateSend();
       }
     };
-
-    servoUpdownSlider.addEventListener('input', function() {
-      servoUpdownValue.textContent = servoUpdownSlider.value;
-      controlStateDirty = true;
-      if (statusSynced) {
-        scheduleControlStateSend();
-      }
-    });
-
-    servoLateralSlider.addEventListener('input', function() {
-      servoLateralValue.textContent = servoLateralSlider.value;
-      controlStateDirty = true;
-      if (statusSynced) {
-        scheduleControlStateSend();
-      }
-    });
 
     motorSlider.addEventListener('input', function() {
       motorValue.textContent = motorSlider.value;
@@ -290,10 +335,42 @@ const char* getWebPage() {
     // Optional: Initial-Status abfragen
     window.addEventListener('load', function() {
       setDirButtons(0);
-      servoUpdownValue.textContent = servoUpdownSlider.value;
-      servoLateralValue.textContent = servoLateralSlider.value;
+      setJoystickValues(0, 0, false);
       motorValue.textContent = motorSlider.value;
     });
+
+    let joystickDragging = false;
+
+    joystickPad.addEventListener('pointerdown', function(event) {
+      joystickDragging = true;
+      joystickPad.setPointerCapture(event.pointerId);
+      updateJoystickFromPointer(event.clientX, event.clientY, true);
+      event.preventDefault();
+    });
+
+    joystickPad.addEventListener('pointermove', function(event) {
+      if (!joystickDragging) {
+        return;
+      }
+
+      updateJoystickFromPointer(event.clientX, event.clientY, true);
+      event.preventDefault();
+    });
+
+    function finishJoystickDrag(event) {
+      if (!joystickDragging) {
+        return;
+      }
+
+      joystickDragging = false;
+      if (joystickPad.hasPointerCapture(event.pointerId)) {
+        joystickPad.releasePointerCapture(event.pointerId);
+      }
+    }
+
+    joystickPad.addEventListener('pointerup', finishJoystickDrag);
+    joystickPad.addEventListener('pointercancel', finishJoystickDrag);
+    window.addEventListener('resize', renderJoystickThumb);
 
     // Seite gegen Touch-Scroll sperren, Slider-Bewegung aber erlauben
     document.addEventListener('touchmove', function(event) {
