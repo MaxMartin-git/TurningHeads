@@ -1,3 +1,5 @@
+English | [中文](readme_cn.md) | [Deutsch](readme_de.md)
+
 # TurningHeads
 
 TurningHeads is a WiFi-coordinated ESP32 project for controlling a two-axis servo rig and a DC motor. The coordinator runs a web UI and WebSocket server, while one or more nodes connect over TCP to receive motor commands.
