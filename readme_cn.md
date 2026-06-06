@@ -1,5 +1,3 @@
-中文 | [English](readme.md) | Deutsch(readme_de.md)
-
 # TurningHeads
 
 TurningHeads 是一个基于 WiFi 协调的 ESP32 项目，用于控制双轴舵机机构和直流电机。协调器运行 Web UI 和 WebSocket 服务器，而一个或多个节点通过 TCP 连接以接收电机指令。
