@@ -7,6 +7,8 @@
 const char* WIFI_SSID = "ESP_TH";
 const char* WIFI_PASS = "TurningHeads123";
 const uint16_t TCP_PORT = 5000;
+const uint16_t NODE_PORT_BASE = 5000;
+const uint8_t NODE_COUNT = 3;
 const uint16_t MOTOR_PWM_PIN = 3;  // PWM-Eingang am Motortreiber
 const uint16_t MOTOR_DIR_PIN = 4;  // DIR-Eingang am Motortreiber
 const uint8_t PWM_CHANNEL = 0;
@@ -27,8 +29,12 @@ const uint16_t SERVO_SPEED = 4095;  // Explicit max speed (stable setting)
 // ============ GLOBALE VARIABLEN ============
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
-WiFiServer tcpServer(TCP_PORT);
-WiFiClient tcpClient;
+WiFiServer tcpServer1(NODE_PORT_BASE + 1);
+WiFiServer tcpServer2(NODE_PORT_BASE + 2);
+WiFiServer tcpServer3(NODE_PORT_BASE + 3);
+WiFiClient tcpClient1;
+WiFiClient tcpClient2;
+WiFiClient tcpClient3;
 uint8_t currentMotorPwm = 0;    // 0..255
 uint8_t currentMotorDir = 0;    // 0=CW, 1=CCW
 int16_t currentServoUpdownValue = 0;    // -80..80, 0 = Mitte (511 bits)
@@ -39,13 +45,220 @@ volatile int16_t desiredServoUpdownValue = 0;
 volatile int16_t desiredServoLateralValue = 0;
 portMUX_TYPE servoMux = portMUX_INITIALIZER_UNLOCKED;
 
+enum NodeTestState {
+  NODE_TEST_IDLE,
+  NODE_TEST_SENDING,
+  NODE_TEST_OK,
+  NODE_TEST_ERROR
+};
+
+struct NodeSlot {
+  uint8_t id;
+  WiFiServer* server;
+  WiFiClient* client;
+  bool connected;
+  NodeTestState testState;
+  bool testPending;
+  uint32_t lastSeenMs;
+  uint32_t lastTestMs;
+  char testMessage[32];
+};
+
+NodeSlot nodeSlots[NODE_COUNT] = {
+  {1, &tcpServer1, &tcpClient1, false, NODE_TEST_IDLE, false, 0, 0, "Bereit"},
+  {2, &tcpServer2, &tcpClient2, false, NODE_TEST_IDLE, false, 0, 0, "Bereit"},
+  {3, &tcpServer3, &tcpClient3, false, NODE_TEST_IDLE, false, 0, 0, "Bereit"}
+};
+
+const uint32_t NODE_HEARTBEAT_TIMEOUT_MS = 4000;
+const uint32_t NODE_TEST_TIMEOUT_MS = 2500;
+
+const char* nodeTestStateToString(NodeTestState state) {
+  switch (state) {
+    case NODE_TEST_SENDING: return "sending";
+    case NODE_TEST_OK: return "ok";
+    case NODE_TEST_ERROR: return "error";
+    case NODE_TEST_IDLE:
+    default: return "idle";
+  }
+}
+
+NodeSlot* getNodeSlotById(uint8_t nodeId) {
+  for (uint8_t index = 0; index < NODE_COUNT; ++index) {
+    if (nodeSlots[index].id == nodeId) {
+      return &nodeSlots[index];
+    }
+  }
+  return nullptr;
+}
+
+void setNodeTestState(NodeSlot &node, NodeTestState state, const char* message) {
+  node.testState = state;
+  strncpy(node.testMessage, message, sizeof(node.testMessage) - 1);
+  node.testMessage[sizeof(node.testMessage) - 1] = '\0';
+}
+
+void markNodeSeen(NodeSlot &node) {
+  node.lastSeenMs = millis();
+  node.connected = true;
+}
+
+uint8_t countConnectedNodes() {
+  uint8_t count = 0;
+  for (uint8_t index = 0; index < NODE_COUNT; ++index) {
+    if (nodeSlots[index].connected) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+String buildStatusMessage() {
+  String statusMsg = "{";
+  statusMsg += "\"servoUpdown\":";
+  statusMsg += currentServoUpdownValue;
+  statusMsg += ",\"servoLateral\":";
+  statusMsg += currentServoLateralValue;
+  statusMsg += ",\"motorPwm\":";
+  statusMsg += currentMotorPwm;
+  statusMsg += ",\"motorDir\":";
+  statusMsg += currentMotorDir;
+  statusMsg += ",\"connectedNodes\":";
+  statusMsg += countConnectedNodes();
+  statusMsg += ",\"nodeCount\":";
+  statusMsg += NODE_COUNT;
+  statusMsg += ",\"nodeConnected\":";
+  statusMsg += (countConnectedNodes() > 0) ? "true" : "false";
+  statusMsg += ",\"nodes\":[";
+
+  for (uint8_t index = 0; index < NODE_COUNT; ++index) {
+    NodeSlot &node = nodeSlots[index];
+    statusMsg += "{";
+    statusMsg += "\"id\":";
+    statusMsg += node.id;
+    statusMsg += ",\"connected\":";
+    statusMsg += node.connected ? "true" : "false";
+    statusMsg += ",\"lastSeenMs\":";
+    statusMsg += node.lastSeenMs;
+    statusMsg += ",\"testState\":\"";
+    statusMsg += nodeTestStateToString(node.testState);
+    statusMsg += "\",\"testMessage\":\"";
+    statusMsg += node.testMessage;
+    statusMsg += "\"}";
+    if (index + 1 < NODE_COUNT) {
+      statusMsg += ",";
+    }
+  }
+
+  statusMsg += "]}";
+  return statusMsg;
+}
+
+void broadcastStatus() {
+  ws.textAll(buildStatusMessage());
+}
+
+void sendNodeTestSignal(NodeSlot &node) {
+  if (!node.connected || !node.client->connected()) {
+    setNodeTestState(node, NODE_TEST_ERROR, "Node nicht verbunden");
+    node.testPending = false;
+    broadcastStatus();
+    return;
+  }
+
+  node.client->println("TEST");
+  node.lastTestMs = millis();
+  node.testPending = true;
+  setNodeTestState(node, NODE_TEST_SENDING, "Signal gesendet");
+  broadcastStatus();
+}
+
+void updateNodeConnection(NodeSlot &node, bool connected, const char* message) {
+  node.connected = connected;
+  if (!connected) {
+    node.client->stop();
+    node.testPending = false;
+    setNodeTestState(node, NODE_TEST_ERROR, message);
+  } else {
+    setNodeTestState(node, NODE_TEST_IDLE, message);
+  }
+  broadcastStatus();
+}
+
+void serviceNodeSlot(NodeSlot &node) {
+  if (!node.client->connected()) {
+    WiFiClient newClient = node.server->available();
+    if (newClient) {
+      *node.client = newClient;
+      updateNodeConnection(node, true, "Node bereit");
+      Serial.printf("[TCP] Node %u connected on port %u\n", node.id, (unsigned)(NODE_PORT_BASE + node.id));
+    }
+    return;
+  }
+
+  while (node.client->available()) {
+    String line = node.client->readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) {
+      continue;
+    }
+
+    Serial.printf("[TCP RX node %u] %s\n", node.id, line.c_str());
+
+    if (line.startsWith("NODE_READY") || line.startsWith("HELLO")) {
+      markNodeSeen(node);
+      updateNodeConnection(node, true, "Node bereit");
+      continue;
+    }
+
+    if (line.startsWith("PONG") || line.startsWith("TEST_OK")) {
+      markNodeSeen(node);
+      node.testPending = false;
+      setNodeTestState(node, NODE_TEST_OK, "Antwort vom Node");
+      broadcastStatus();
+      continue;
+    }
+
+    if (line.startsWith("HEARTBEAT") || line.startsWith("ALIVE")) {
+      markNodeSeen(node);
+      if (!node.connected) {
+        updateNodeConnection(node, true, "Node bereit");
+      } else {
+        broadcastStatus();
+      }
+      continue;
+    }
+  }
+
+  if (!node.client->connected()) {
+    if (node.connected) {
+      updateNodeConnection(node, false, "Verbindung verloren");
+      Serial.printf("[TCP] Node %u disconnected\n", node.id);
+    }
+  }
+}
+
+void checkNodeHealth(NodeSlot &node) {
+  if (node.connected && node.lastSeenMs != 0 && (millis() - node.lastSeenMs) > NODE_HEARTBEAT_TIMEOUT_MS) {
+    updateNodeConnection(node, false, "Kein Heartbeat");
+    Serial.printf("[TCP] Node %u heartbeat timeout\n", node.id);
+    return;
+  }
+
+  if (node.testPending && (millis() - node.lastTestMs) > NODE_TEST_TIMEOUT_MS) {
+    node.testPending = false;
+    setNodeTestState(node, NODE_TEST_ERROR, "Keine Antwort");
+    broadcastStatus();
+  }
+}
+
 // ============ HILFSFUNKTION: HTML/CSS/JS WEB-UI ============
 const char* getWebPage() {
   return R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
-  <title>TurningHeads Control</title>
+  <title>TurningHeads</title>
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <style>
     html, body {
@@ -123,6 +336,60 @@ const char* getWebPage() {
       color: #bdbdbd;
       font-size: 13px;
     }
+    .node-grid {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+    }
+    .node-card {
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 14px;
+      background: #2b2b2b;
+      text-align: left;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .node-card-header {
+      font-weight: bold;
+      color: #fff;
+    }
+    .node-card-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: bold;
+      color: #f2f2f2;
+    }
+    .node-card-message {
+      color: #bdbdbd;
+      font-size: 13px;
+      min-height: 18px;
+    }
+    .node-card button {
+      border: 0;
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-weight: bold;
+      background: #4CAF50;
+      color: #111;
+    }
+    .node-card button:active {
+      transform: translateY(1px);
+    }
+    .signal-light {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #666;
+      box-shadow: 0 0 0 3px rgba(255,255,255,0.06);
+    }
+    .signal-idle { background: #666; }
+    .signal-sending { background: #ffb300; box-shadow: 0 0 14px rgba(255, 179, 0, 0.7); }
+    .signal-ok { background: #4CAF50; box-shadow: 0 0 14px rgba(76, 175, 80, 0.8); }
+    .signal-error { background: #f44336; box-shadow: 0 0 14px rgba(244, 67, 54, 0.75); }
     #status {
       margin-top: 20px;
       padding: 10px;
@@ -159,6 +426,36 @@ const char* getWebPage() {
       <button id="dirCcw" type="button">CCW</button>
     </div>
 
+    <div class="node-grid">
+      <div class="node-card">
+        <div class="node-card-header">Node 1</div>
+        <div class="node-card-status">
+          <span id="node1Light" class="signal-light signal-idle"></span>
+          <span id="node1Connection">Disconnected</span>
+        </div>
+        <button id="node1TestButton" type="button">Testsignal senden</button>
+        <div id="node1Message" class="node-card-message">Bereit</div>
+      </div>
+      <div class="node-card">
+        <div class="node-card-header">Node 2</div>
+        <div class="node-card-status">
+          <span id="node2Light" class="signal-light signal-idle"></span>
+          <span id="node2Connection">Disconnected</span>
+        </div>
+        <button id="node2TestButton" type="button">Testsignal senden</button>
+        <div id="node2Message" class="node-card-message">Bereit</div>
+      </div>
+      <div class="node-card">
+        <div class="node-card-header">Node 3</div>
+        <div class="node-card-status">
+          <span id="node3Light" class="signal-light signal-idle"></span>
+          <span id="node3Connection">Disconnected</span>
+        </div>
+        <button id="node3TestButton" type="button">Testsignal senden</button>
+        <div id="node3Message" class="node-card-message">Bereit</div>
+      </div>
+    </div>
+
     <div id="status">
       <div>WebSocket: <span id="wsStatus" class="status-error">Disconnected</span></div>
       <div>Node: <span id="nodeStatus" class="status-error">No signal</span></div>
@@ -186,6 +483,15 @@ const char* getWebPage() {
     let controlSendTimer = null;
     let statusSynced = false;
     let controlStateDirty = false;
+    const nodeUi = [1, 2, 3].map(function(nodeId) {
+      return {
+        id: nodeId,
+        button: document.getElementById('node' + nodeId + 'TestButton'),
+        light: document.getElementById('node' + nodeId + 'Light'),
+        connection: document.getElementById('node' + nodeId + 'Connection'),
+        message: document.getElementById('node' + nodeId + 'Message')
+      };
+    });
 
     function clamp(value, min, max) {
       return Math.min(max, Math.max(min, value));
@@ -258,6 +564,31 @@ const char* getWebPage() {
       dirCcw.style.background = dir === 1 ? '#4CAF50' : '#555';
     }
 
+    function setNodeUi(nodeId, connected, state, message) {
+      const node = nodeUi.find(function(entry) {
+        return entry.id === nodeId;
+      });
+
+      if (!node) {
+        return;
+      }
+
+      node.light.className = 'signal-light signal-' + state;
+      node.connection.textContent = connected ? 'Connected' : 'Disconnected';
+      node.connection.className = connected ? 'status-ok' : 'status-error';
+      node.message.textContent = message;
+    }
+
+    function requestNodeTest(nodeId) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        setNodeUi(nodeId, false, 'error', 'WebSocket getrennt');
+        return;
+      }
+
+      setNodeUi(nodeId, true, 'sending', 'Signal wird gesendet...');
+      ws.send(JSON.stringify({cmd: 'nodeTest', nodeId: nodeId}));
+    }
+
     // WebSocket verbunden
     ws.onopen = function(event) {
       console.log('WebSocket connected');
@@ -277,13 +608,12 @@ const char* getWebPage() {
     ws.onmessage = function(event) {
       const data = JSON.parse(event.data);
       // Server schickt Status zurück
-      if (data.nodeConnected) {
-        nodeStatus.textContent = 'Connected';
-        nodeStatus.className = 'status-ok';
-      } else {
-        nodeStatus.textContent = 'Disconnected';
-        nodeStatus.className = 'status-error';
-      }
+      const nodeCount = typeof data.nodeCount === 'number' ? data.nodeCount : 3;
+      const connectedNodes = typeof data.connectedNodes === 'number'
+        ? data.connectedNodes
+        : (Array.isArray(data.nodes) ? data.nodes.filter(function(node) { return !!node.connected; }).length : 0);
+      nodeStatus.textContent = connectedNodes + '/' + nodeCount + ' connected';
+      nodeStatus.className = connectedNodes > 0 ? 'status-ok' : 'status-error';
 
           if (typeof data.servoUpdown === 'number' || typeof data.servoLateral === 'number') {
             setJoystickValues(
@@ -300,6 +630,17 @@ const char* getWebPage() {
 
       if (typeof data.motorDir === 'number') {
         setDirButtons(data.motorDir);
+      }
+
+      if (Array.isArray(data.nodes)) {
+        data.nodes.forEach(function(node) {
+          setNodeUi(
+            node.id,
+            !!node.connected,
+            typeof node.testState === 'string' ? node.testState : 'idle',
+            typeof node.testMessage === 'string' ? node.testMessage : 'Bereit'
+          );
+        });
       }
 
       statusSynced = true;
@@ -332,11 +673,20 @@ const char* getWebPage() {
       }
     });
 
+    nodeUi.forEach(function(node) {
+      node.button.addEventListener('click', function() {
+        requestNodeTest(node.id);
+      });
+    });
+
     // Optional: Initial-Status abfragen
     window.addEventListener('load', function() {
       setDirButtons(0);
       setJoystickValues(0, 0, false);
       motorValue.textContent = motorSlider.value;
+      nodeUi.forEach(function(node) {
+        setNodeUi(node.id, false, 'idle', 'Bereit');
+      });
     });
 
     let joystickDragging = false;
@@ -513,6 +863,17 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
       
       Serial.printf("[WS] Received: %s\n", buffer);
 
+      if (strstr(buffer, "\"nodeTest\"") != NULL) {
+        int nodeId = -1;
+        if (parseJsonIntInRange(buffer, "nodeId", 1, NODE_COUNT, &nodeId)) {
+          NodeSlot* node = getNodeSlotById((uint8_t)nodeId);
+          if (node != nullptr) {
+            sendNodeTestSignal(*node);
+          }
+        }
+        return;
+      }
+
       int servoUpdownValue = currentServoUpdownValue;
       int servoLateralValue = currentServoLateralValue;
       bool servoUpdownChanged = false;
@@ -556,19 +917,17 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         }
         applyDcMotorDriver((uint8_t)newMotorPwm, (uint8_t)newMotorDir);
 
-        if (tcpClient.connected()) {
-          char tcpMsg[20];
-          snprintf(tcpMsg, sizeof(tcpMsg), "M:%d\n", currentMotorPwm);
-          tcpClient.print(tcpMsg);
+        char tcpMsg[20];
+        snprintf(tcpMsg, sizeof(tcpMsg), "M:%d\n", currentMotorPwm);
+        for (uint8_t index = 0; index < NODE_COUNT; ++index) {
+          if (nodeSlots[index].connected && nodeSlots[index].client->connected()) {
+            nodeSlots[index].client->print(tcpMsg);
+          }
         }
       }
 
       if (strstr(buffer, "\"getStatus\"") != NULL) {
-        char statusMsg[140];
-        snprintf(statusMsg, sizeof(statusMsg), "{\"servoUpdown\":%d,\"servoLateral\":%d,\"motorPwm\":%u,\"motorDir\":%u,\"nodeConnected\":%s}",
-                 currentServoUpdownValue, currentServoLateralValue, currentMotorPwm, currentMotorDir,
-                 tcpClient.connected() ? "true" : "false");
-        client->text(statusMsg);
+        client->text(buildStatusMessage());
       }
     }
   }
@@ -617,26 +976,19 @@ void setup() {
   Serial.println("[HTTP] Web server started on port 80");
 
   // TCP Server für Node starten
-  tcpServer.begin();
-  Serial.printf("[TCP] Listening on port %d for Node\n", TCP_PORT);
+  for (uint8_t index = 0; index < NODE_COUNT; ++index) {
+    nodeSlots[index].server->begin();
+    Serial.printf("[TCP] Listening on port %u for Node %u\n", (unsigned)(NODE_PORT_BASE + nodeSlots[index].id), nodeSlots[index].id);
+  }
+
+  broadcastStatus();
 }
 
 // ============ LOOP ============
 void loop() {
-  // Auf neue TCP-Verbindung vom Node prüfen
-  if (!tcpClient.connected()) {
-    WiFiClient newClient = tcpServer.available();
-    if (newClient) {
-      tcpClient = newClient;
-      Serial.println("[TCP] Node connected!");
-    }
-  } 
-  else {
-    // Optional: Nachrichten vom Node lesen (falls Node zurücksendet)
-    while (tcpClient.available()) {
-      String line = tcpClient.readStringUntil('\n');
-      Serial.printf("[TCP RX] %s\n", line.c_str());
-    }
+  for (uint8_t index = 0; index < NODE_COUNT; ++index) {
+    serviceNodeSlot(nodeSlots[index]);
+    checkNodeHealth(nodeSlots[index]);
   }
 
   delay(10);
