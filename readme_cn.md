@@ -34,7 +34,7 @@ TurningHeads 是一个基于 WiFi 协调的 ESP32 项目，用于控制双轴舵
 2. 在 VS Code 中打开此项目文件夹。
 3. 在 `platformio.ini` 中选择所需环境：
    - `coordinator` - 带 Web UI 和舵机控制的协调器固件
-   - `node` - 节点电机控制固件
+   - `node1` - 节点电机控制固件（NODE_ID=1）
    - `servo_id_setter` - 舵机 ID 配置辅助程序
    - `servo_id_reader` - 舵机 ID 读取辅助程序
    - `servo_center_setter` - 舵机中心校准辅助程序
@@ -50,7 +50,7 @@ TurningHeads 是一个基于 WiFi 协调的 ESP32 项目，用于控制双轴舵
 
 ## 节点使用
 
-1. 使用 `node` 环境刷写 `src/main_node.cpp`。
+1. 使用 `node1`、`node2` 或 `node3` 环境刷写 `src/main_node.cpp`。
 2. 将节点接线配置为 `GPIO3` 为电机驱动器提供 PWM。
 3. 将节点连接到协调器 WiFi AP。
 4. 节点将尝试连接到 `192.168.4.1:5000`，并从协调器接收电机指令。

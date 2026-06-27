@@ -1,6 +1,6 @@
 ﻿# TurningHeads
 
-TurningHeads ist ein WiFi-koordiniertes ESP32-Projekt zur Steuerung eines zweiachsigen Servo-Rigs und eines Gleichstrommotors. Der Koordinator betreibt eine Weboberfläche und einen WebSocket-Server, während ein oder mehrere Knoten über TCP verbinden, um Motorbefehle zu empfangen.
+TurningHeads ist ein WiFi-koordiniertes ESP32-Projekt zur Steuerung gespiegelter Left/Right-Base- und Satellite-Nodes. Der Koordinator betreibt die Weboberfläche und den WebSocket-Server, fungiert gleichzeitig als lokale Base_L und verteilt seitenbezogene Befehle über TCP.
 
 ## Projektstruktur
 
@@ -15,18 +15,28 @@ TurningHeads ist ein WiFi-koordiniertes ESP32-Projekt zur Steuerung eines zweiac
 ## Funktionen
 
 - Der Koordinator erstellt einen WiFi-Zugangspunkt: `ESP_TH` / `TurningHeads123`
-- HTTP-Weboberfläche mit joystickähnlicher Servo-Steuerung
-- WebSocket-Updates für Servo-Position, Motor-PWM, Motordrehrichtung und Knotenverbindungsstatus
-- TCP-Server auf Port `5000` für Knoten-Motorbefehle
-- SCServo-Steuerung für Auf/Ab- und Quer-Servos über UART
-- PWM-Ausgang zur Steuerung des DC-Motors am Knoten
+- Kompakte HTTP-Weboberfläche mit gedoppelten Left/Right-Bedienelementen
+- Zwei Joystick-Pads (links/rechts) für seitengetrennte Servo-Ziele
+- Zwei unabhängige Motor-Bedienelemente (PWM + Richtung) für linke/rechte Base
+- WebSocket-Status für beide Seiten plus Knoten-Verbindung/Testzustand
+- TCP-Server auf Ports `5001..5003` für node-spezifisches Routing
+- SCServo-Steuerung der lokalen linken Servos über UART
 
 ## Hardware
 
 - ESP32-C3-Entwicklungsboard
 - SCServo-kompatibler Servo-Controller oder direkte UART-Servo-Schnittstelle
 - Gleichstrommotor-Treiber mit PWM-Eingang
-- Knotengerät verbindet sich mit dem WiFi-AP des Koordinators
+- Bis zu drei Remote-Knoten verbinden sich mit dem WiFi-AP des Koordinators
+
+## Topologie
+
+- Koordinator: Base_L (lokal)
+- Node 1: Satellite_L
+- Node 2: Base_R
+- Node 3: Satellite_R
+
+Gemeinsame Rollen- und Capabilities-Definitionen liegen unter `src/shared/`.
 
 ## Erstellen & Hochladen
 
@@ -34,7 +44,7 @@ TurningHeads ist ein WiFi-koordiniertes ESP32-Projekt zur Steuerung eines zweiac
 2. Öffne diesen Projektordner in VS Code.
 3. Wähle die gewünschte Umgebung in `platformio.ini`:
    - `coordinator` - Koordinator-Firmware mit Weboberfläche und Servo-Steuerung
-   - `node` - Knoten-Firmware für die Motorsteuerung
+   - `node1` - Knoten-Firmware für die Motorsteuerung (NODE_ID=1)
    - `servo_id_setter` - Hilfsprogramm zum Konfigurieren der Servo-ID
    - `servo_id_reader` - Hilfsprogramm zum Lesen der Servo-ID
    - `servo_center_setter` - Hilfsprogramm zur Kalibrierung des Servo-Mittelpunkts
@@ -46,14 +56,16 @@ TurningHeads ist ein WiFi-koordiniertes ESP32-Projekt zur Steuerung eines zweiac
 1. Flashe `src/main.cpp` mit der Umgebung `coordinator`.
 2. Schließe das Board an die Stromversorgung an und verbinde dich mit dem WiFi-AP `ESP_TH` mit dem Passwort `TurningHeads123`.
 3. Öffne einen Browser und rufe `http://192.168.4.1/` auf.
-4. Verwende den Bildschirm-Joystick und die Motorsteuerung, um die Servos zu bewegen und Motorbefehle an den Knoten zu senden.
+4. Verwende die Left/Right-Bedienelemente auf der Oberfläche, um beide Seiten getrennt zu steuern.
 
 ## Verwendung des Knotens
 
-1. Flashe `src/main_node.cpp` mit der Umgebung `node`.
+1. Flashe `src/main_node.cpp` mit einer der Node-Umgebungen (`node1`, `node2`, `node3`).
 2. Konfiguriere die Verkabelung des Knotens so, dass `GPIO3` PWM an den Motor-Treiber liefert.
 3. Verbinde den Knoten mit dem WiFi-AP des Koordinators.
-4. Der Knoten versucht, sich mit `192.168.4.1:5000` zu verbinden und Motorbefehle vom Koordinator zu empfangen.
+4. Der Knoten verbindet sich auf seinen dedizierten Port (`5001`, `5002` oder `5003`) und führt nur rollenspezifische Befehle aus:
+   - Base-Nodes: Motorbefehle
+   - Satellite-Nodes: Servo-Befehle
 
 ## Hinweise
 

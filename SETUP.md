@@ -25,7 +25,7 @@ platformio run -e coordinator --target upload
 
 ### 2. **Node Flashen** (neuer Ordner)
 ```bash
-platformio run -e node --target upload
+platformio run -e node1 --target upload
 ```
 
 ### 3. **Servo-Mitte speichern**
@@ -97,7 +97,7 @@ Smartphone WebSocket       Coordinator         TCP         Node
 ### Node verbindet sich nicht zum Coordinator
 1. Prüfe SSID und Passwort in `src_node/main.cpp` 
 2. Prüfe IP des Coordinators (sollte 192.168.4.1 sein)
-3. Serielle Ausgabe der Node anschauen: `platformio device monitor -e node`
+3. Serielle Ausgabe der Node anschauen: `platformio device monitor -e node1`
 
 ### Smartphone kann sich nicht zu `TurningHeads` verbinden
 1. Serielle Monitor Coordinator: `platformio device monitor -e coordinator`

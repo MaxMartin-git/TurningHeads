@@ -2,18 +2,20 @@
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <SCServo.h>
+#include "shared/th_roles.h"
+#include "shared/th_input_modes.h"
+#include "shared/th_protocol.h"
+#include "coordinator/th_wifi_ap.h"
+#include "coordinator/th_json_utils.h"
+#include "coordinator/th_web_page.h"
 
 // ============ KONFIGURATION ============
 const char* WIFI_SSID = "ESP_TH";
 const char* WIFI_PASS = "TurningHeads123";
-const uint16_t TCP_PORT = 5000;
 const uint16_t NODE_PORT_BASE = 5000;
 const uint8_t NODE_COUNT = 3;
 const uint16_t MOTOR_PWM_PIN = 3;  // PWM-Eingang am Motortreiber
 const uint16_t MOTOR_DIR_PIN = 4;  // DIR-Eingang am Motortreiber
-const uint8_t PWM_CHANNEL = 0;
-const uint16_t PWM_FREQ = 1000;  // Hz
-const uint8_t PWM_RESOLUTION = 8;  // 8-bit = 0..255
 const uint8_t SERVO_UART_TX_PIN = 21;
 const uint8_t SERVO_UART_RX_PIN = 20;
 const uint32_t SERVO_BAUD = 1000000;  // SC09 braucht 1 Mbps
@@ -35,10 +37,27 @@ WiFiServer tcpServer3(NODE_PORT_BASE + 3);
 WiFiClient tcpClient1;
 WiFiClient tcpClient2;
 WiFiClient tcpClient3;
-uint8_t currentMotorPwm = 0;    // 0..255
-uint8_t currentMotorDir = 0;    // 0=CW, 1=CCW
-int16_t currentServoUpdownValue = 0;    // -80..80, 0 = Mitte (511 bits)
-int16_t currentServoLateralValue = 0;  // -80..80, 0 = Mitte (511 bits)
+
+struct SideControlState {
+  uint8_t motorPwm;
+  uint8_t motorDir;
+  int16_t servoUpdown;
+  int16_t servoLateral;
+};
+
+SideControlState sideState[2] = {
+  {0, 0, 0, 0},  // Left side (local base/coordinator)
+  {0, 0, 0, 0}   // Right side (remote base/satellite)
+};
+
+bool motorLinkEnabled = true;
+bool motorMirrorEnabled = true;
+bool eyeballLinkEnabled = true;
+bool eyeballMirrorEnabled = true;
+
+th::InputMode currentInputMode = th::InputMode::Manual;
+uint16_t activeSequenceId = 0;
+uint16_t activeSequenceStep = 0;
 SCSCL scServo;
 // Desired servo positions written by WebSocket handler; actual writes happen in servoTask
 volatile int16_t desiredServoUpdownValue = 0;
@@ -54,6 +73,7 @@ enum NodeTestState {
 
 struct NodeSlot {
   uint8_t id;
+  th::DeviceProfile profile;
   WiFiServer* server;
   WiFiClient* client;
   bool connected;
@@ -65,9 +85,9 @@ struct NodeSlot {
 };
 
 NodeSlot nodeSlots[NODE_COUNT] = {
-  {1, &tcpServer1, &tcpClient1, false, NODE_TEST_IDLE, false, 0, 0, "Bereit"},
-  {2, &tcpServer2, &tcpClient2, false, NODE_TEST_IDLE, false, 0, 0, "Bereit"},
-  {3, &tcpServer3, &tcpClient3, false, NODE_TEST_IDLE, false, 0, 0, "Bereit"}
+  {1, th::getRemoteNodeProfile(1), &tcpServer1, &tcpClient1, false, NODE_TEST_IDLE, false, 0, 0, "Ready"},
+  {2, th::getRemoteNodeProfile(2), &tcpServer2, &tcpClient2, false, NODE_TEST_IDLE, false, 0, 0, "Ready"},
+  {3, th::getRemoteNodeProfile(3), &tcpServer3, &tcpClient3, false, NODE_TEST_IDLE, false, 0, 0, "Ready"}
 };
 
 const uint32_t NODE_HEARTBEAT_TIMEOUT_MS = 4000;
@@ -113,16 +133,71 @@ uint8_t countConnectedNodes() {
   return count;
 }
 
+SideControlState& getSideState(th::Side side) {
+  return sideState[th::sideToIndex(side)];
+}
+
+const SideControlState& getSideStateConst(th::Side side) {
+  return sideState[th::sideToIndex(side)];
+}
+
+th::Side oppositeSide(th::Side side) {
+  return side == th::Side::Right ? th::Side::Left : th::Side::Right;
+}
+
+uint8_t mirroredMotorDir(uint8_t dirValue) {
+  return dirValue == 0 ? 1 : 0;
+}
+
+int16_t mirrorEyeballLateral(int16_t value) {
+  return static_cast<int16_t>(-value);
+}
+
 String buildStatusMessage() {
+  const SideControlState& left = getSideStateConst(th::Side::Left);
+  const SideControlState& right = getSideStateConst(th::Side::Right);
+
   String statusMsg = "{";
-  statusMsg += "\"servoUpdown\":";
-  statusMsg += currentServoUpdownValue;
+  statusMsg += "\"inputMode\":\"";
+  statusMsg += (currentInputMode == th::InputMode::Manual) ? "manual" : "sequence";
+  statusMsg += "\",\"sequenceId\":";
+  statusMsg += activeSequenceId;
+  statusMsg += ",\"sequenceStep\":";
+  statusMsg += activeSequenceStep;
+  statusMsg += ",";
+  statusMsg += "\"leftServoUpdown\":";
+  statusMsg += left.servoUpdown;
+  statusMsg += ",\"leftServoLateral\":";
+  statusMsg += left.servoLateral;
+  statusMsg += ",\"leftMotorPwm\":";
+  statusMsg += left.motorPwm;
+  statusMsg += ",\"leftMotorDir\":";
+  statusMsg += left.motorDir;
+  statusMsg += ",\"rightServoUpdown\":";
+  statusMsg += right.servoUpdown;
+  statusMsg += ",\"rightServoLateral\":";
+  statusMsg += right.servoLateral;
+  statusMsg += ",\"rightMotorPwm\":";
+  statusMsg += right.motorPwm;
+  statusMsg += ",\"rightMotorDir\":";
+  statusMsg += right.motorDir;
+  statusMsg += ",\"motorLink\":";
+  statusMsg += motorLinkEnabled ? "true" : "false";
+  statusMsg += ",\"motorMirror\":";
+  statusMsg += motorMirrorEnabled ? "true" : "false";
+  statusMsg += ",\"eyeballLink\":";
+  statusMsg += eyeballLinkEnabled ? "true" : "false";
+  statusMsg += ",\"eyeballMirror\":";
+  statusMsg += eyeballMirrorEnabled ? "true" : "false";
+  // Backward compatibility fields (left side mirrors legacy names)
+  statusMsg += ",\"servoUpdown\":";
+  statusMsg += left.servoUpdown;
   statusMsg += ",\"servoLateral\":";
-  statusMsg += currentServoLateralValue;
+  statusMsg += left.servoLateral;
   statusMsg += ",\"motorPwm\":";
-  statusMsg += currentMotorPwm;
+  statusMsg += left.motorPwm;
   statusMsg += ",\"motorDir\":";
-  statusMsg += currentMotorDir;
+  statusMsg += left.motorDir;
   statusMsg += ",\"connectedNodes\":";
   statusMsg += countConnectedNodes();
   statusMsg += ",\"nodeCount\":";
@@ -136,7 +211,11 @@ String buildStatusMessage() {
     statusMsg += "{";
     statusMsg += "\"id\":";
     statusMsg += node.id;
-    statusMsg += ",\"connected\":";
+    statusMsg += ",\"role\":\"";
+    statusMsg += th::toString(node.profile.role);
+    statusMsg += "\",\"label\":\"";
+    statusMsg += node.profile.label;
+    statusMsg += "\",\"connected\":";
     statusMsg += node.connected ? "true" : "false";
     statusMsg += ",\"lastSeenMs\":";
     statusMsg += node.lastSeenMs;
@@ -158,9 +237,39 @@ void broadcastStatus() {
   ws.textAll(buildStatusMessage());
 }
 
+void sendMotorToRemoteBaseNodes(th::Side side, uint8_t pwmValue, uint8_t dirValue) {
+  char tcpMsg[20];
+  th::buildMotorCommand(pwmValue, dirValue, tcpMsg, sizeof(tcpMsg));
+
+  for (uint8_t index = 0; index < NODE_COUNT; ++index) {
+    NodeSlot &node = nodeSlots[index];
+    if (!th::isBaseRole(node.profile.role) || !node.profile.capabilities.hasDcMotor || node.profile.side != side) {
+      continue;
+    }
+    if (node.connected && node.client->connected()) {
+      node.client->print(tcpMsg);
+    }
+  }
+}
+
+void sendServoToRemoteSatelliteNodes(th::Side side, int16_t updownValue, int16_t lateralValue) {
+  char tcpMsg[32];
+  th::buildServoCommand(updownValue, lateralValue, tcpMsg, sizeof(tcpMsg));
+
+  for (uint8_t index = 0; index < NODE_COUNT; ++index) {
+    NodeSlot &node = nodeSlots[index];
+    if (!th::isSatelliteRole(node.profile.role) || !node.profile.capabilities.hasEyeballServos || node.profile.side != side) {
+      continue;
+    }
+    if (node.connected && node.client->connected()) {
+      node.client->print(tcpMsg);
+    }
+  }
+}
+
 void sendNodeTestSignal(NodeSlot &node) {
   if (!node.connected || !node.client->connected()) {
-    setNodeTestState(node, NODE_TEST_ERROR, "Node nicht verbunden");
+    setNodeTestState(node, NODE_TEST_ERROR, "Node not connected");
     node.testPending = false;
     broadcastStatus();
     return;
@@ -169,7 +278,7 @@ void sendNodeTestSignal(NodeSlot &node) {
   node.client->println("TEST");
   node.lastTestMs = millis();
   node.testPending = true;
-  setNodeTestState(node, NODE_TEST_SENDING, "Signal gesendet");
+  setNodeTestState(node, NODE_TEST_SENDING, "Signal sent");
   broadcastStatus();
 }
 
@@ -190,7 +299,7 @@ void serviceNodeSlot(NodeSlot &node) {
     WiFiClient newClient = node.server->available();
     if (newClient) {
       *node.client = newClient;
-      updateNodeConnection(node, true, "Node bereit");
+      updateNodeConnection(node, true, "Node ready");
       Serial.printf("[TCP] Node %u connected on port %u\n", node.id, (unsigned)(NODE_PORT_BASE + node.id));
     }
     return;
@@ -207,14 +316,14 @@ void serviceNodeSlot(NodeSlot &node) {
 
     if (line.startsWith("NODE_READY") || line.startsWith("HELLO")) {
       markNodeSeen(node);
-      updateNodeConnection(node, true, "Node bereit");
+      updateNodeConnection(node, true, "Node ready");
       continue;
     }
 
     if (line.startsWith("PONG") || line.startsWith("TEST_OK")) {
       markNodeSeen(node);
       node.testPending = false;
-      setNodeTestState(node, NODE_TEST_OK, "Antwort vom Node");
+      setNodeTestState(node, NODE_TEST_OK, "Reply from node");
       broadcastStatus();
       continue;
     }
@@ -222,7 +331,7 @@ void serviceNodeSlot(NodeSlot &node) {
     if (line.startsWith("HEARTBEAT") || line.startsWith("ALIVE")) {
       markNodeSeen(node);
       if (!node.connected) {
-        updateNodeConnection(node, true, "Node bereit");
+        updateNodeConnection(node, true, "Node ready");
       } else {
         broadcastStatus();
       }
@@ -232,7 +341,7 @@ void serviceNodeSlot(NodeSlot &node) {
 
   if (!node.client->connected()) {
     if (node.connected) {
-      updateNodeConnection(node, false, "Verbindung verloren");
+      updateNodeConnection(node, false, "Connection lost");
       Serial.printf("[TCP] Node %u disconnected\n", node.id);
     }
   }
@@ -240,498 +349,16 @@ void serviceNodeSlot(NodeSlot &node) {
 
 void checkNodeHealth(NodeSlot &node) {
   if (node.connected && node.lastSeenMs != 0 && (millis() - node.lastSeenMs) > NODE_HEARTBEAT_TIMEOUT_MS) {
-    updateNodeConnection(node, false, "Kein Heartbeat");
+    updateNodeConnection(node, false, "No heartbeat");
     Serial.printf("[TCP] Node %u heartbeat timeout\n", node.id);
     return;
   }
 
   if (node.testPending && (millis() - node.lastTestMs) > NODE_TEST_TIMEOUT_MS) {
     node.testPending = false;
-    setNodeTestState(node, NODE_TEST_ERROR, "Keine Antwort");
+    setNodeTestState(node, NODE_TEST_ERROR, "No reply");
     broadcastStatus();
   }
-}
-
-// ============ HILFSFUNKTION: HTML/CSS/JS WEB-UI ============
-const char* getWebPage() {
-  return R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-  <title>TurningHeads</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <style>
-    html, body {
-      height: 100%;
-      overflow: hidden;
-      overscroll-behavior: none;
-    }
-    body {
-      font-family: Arial, sans-serif;
-      max-width: 600px;
-      margin: 50px auto;
-      background: #222;
-      color: #fff;
-      text-align: center;
-    }
-    h1 { 
-      color: #4CAF50; 
-      margin-bottom: 30px;
-    }
-    .container {
-      background: #333;
-      padding: 20px;
-      border-radius: 10px;
-      box-shadow: 0 0 10px rgba(0,0,0,0.5);
-    }
-    .joystick-panel {
-      margin: 20px 0 10px;
-    }
-    .joystick-readout {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      margin-bottom: 12px;
-      font-weight: bold;
-    }
-    .joystick-readout div {
-      background: #2a2a2a;
-      border: 1px solid #4b4b4b;
-      border-radius: 8px;
-      padding: 10px 12px;
-    }
-    .joystick-pad {
-      position: relative;
-      width: min(72vw, 280px);
-      aspect-ratio: 1 / 1;
-      margin: 0 auto;
-      border-radius: 18px;
-      border: 1px solid #555;
-      background:
-        radial-gradient(circle at center, rgba(76, 175, 80, 0.16), transparent 45%),
-        linear-gradient(90deg, transparent 49.5%, rgba(255,255,255,0.12) 50%, transparent 50.5%),
-        linear-gradient(0deg, transparent 49.5%, rgba(255,255,255,0.12) 50%, transparent 50.5%),
-        #1f1f1f;
-      touch-action: none;
-      user-select: none;
-      -webkit-user-select: none;
-    }
-    .joystick-thumb {
-      position: absolute;
-      left: 50%;
-      top: 50%;
-      width: 54px;
-      height: 54px;
-      margin-left: -27px;
-      margin-top: -27px;
-      border-radius: 50%;
-      background: radial-gradient(circle at 30% 30%, #7ae57e, #2d9f3b 55%, #1b6f28 100%);
-      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
-      transform: translate(0px, 0px);
-      transition: transform 40ms linear;
-      pointer-events: none;
-    }
-    .joystick-hint {
-      margin-top: 10px;
-      color: #bdbdbd;
-      font-size: 13px;
-    }
-    .node-grid {
-      margin-top: 18px;
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-      gap: 12px;
-    }
-    .node-card {
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 12px;
-      padding: 14px;
-      background: #2b2b2b;
-      text-align: left;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .node-card-header {
-      font-weight: bold;
-      color: #fff;
-    }
-    .node-card-status {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      font-weight: bold;
-      color: #f2f2f2;
-    }
-    .node-card-message {
-      color: #bdbdbd;
-      font-size: 13px;
-      min-height: 18px;
-    }
-    .node-card button {
-      border: 0;
-      border-radius: 10px;
-      padding: 12px 16px;
-      font-weight: bold;
-      background: #4CAF50;
-      color: #111;
-    }
-    .node-card button:active {
-      transform: translateY(1px);
-    }
-    .signal-light {
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: #666;
-      box-shadow: 0 0 0 3px rgba(255,255,255,0.06);
-    }
-    .signal-idle { background: #666; }
-    .signal-sending { background: #ffb300; box-shadow: 0 0 14px rgba(255, 179, 0, 0.7); }
-    .signal-ok { background: #4CAF50; box-shadow: 0 0 14px rgba(76, 175, 80, 0.8); }
-    .signal-error { background: #f44336; box-shadow: 0 0 14px rgba(244, 67, 54, 0.75); }
-    #status {
-      margin-top: 20px;
-      padding: 10px;
-      border-radius: 5px;
-      background: #444;
-      font-size: 14px;
-    }
-    .status-ok { color: #4CAF50; }
-    .status-error { color: #f44336; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>🎮 TurningHeads</h1>
-    
-    <div class="joystick-panel">
-      <div class="joystick-readout">
-        <div>Updown: <span id="servoUpdownValue">0</span></div>
-        <div>Lateral: <span id="servoLateralValue">0</span></div>
-      </div>
-      <div id="joystickPad" class="joystick-pad" aria-label="Servo joystick">
-        <div id="joystickThumb" class="joystick-thumb"></div>
-      </div>
-      <div class="joystick-hint">Drag to set both axes. Position stays where you leave it.</div>
-    </div>
-
-    <label>DC Motor PWM (0..255)</label>
-    <input type="range" id="motorSlider" min="0" max="255" value="0">
-    <div id="motorValue">0</div>
-
-    <label>DC Motor Richtung</label>
-    <div>
-      <button id="dirCw" type="button">CW</button>
-      <button id="dirCcw" type="button">CCW</button>
-    </div>
-
-    <div class="node-grid">
-      <div class="node-card">
-        <div class="node-card-header">Node 1</div>
-        <div class="node-card-status">
-          <span id="node1Light" class="signal-light signal-idle"></span>
-          <span id="node1Connection">Disconnected</span>
-        </div>
-        <button id="node1TestButton" type="button">Testsignal senden</button>
-        <div id="node1Message" class="node-card-message">Bereit</div>
-      </div>
-      <div class="node-card">
-        <div class="node-card-header">Node 2</div>
-        <div class="node-card-status">
-          <span id="node2Light" class="signal-light signal-idle"></span>
-          <span id="node2Connection">Disconnected</span>
-        </div>
-        <button id="node2TestButton" type="button">Testsignal senden</button>
-        <div id="node2Message" class="node-card-message">Bereit</div>
-      </div>
-      <div class="node-card">
-        <div class="node-card-header">Node 3</div>
-        <div class="node-card-status">
-          <span id="node3Light" class="signal-light signal-idle"></span>
-          <span id="node3Connection">Disconnected</span>
-        </div>
-        <button id="node3TestButton" type="button">Testsignal senden</button>
-        <div id="node3Message" class="node-card-message">Bereit</div>
-      </div>
-    </div>
-
-    <div id="status">
-      <div>WebSocket: <span id="wsStatus" class="status-error">Disconnected</span></div>
-      <div>Node: <span id="nodeStatus" class="status-error">No signal</span></div>
-    </div>
-  </div>
-
-  <script>
-    // === WebSocket Verbindung ===
-    const ws = new WebSocket('ws://' + window.location.host + '/ws');
-    const servoUpdownValue = document.getElementById('servoUpdownValue');
-    const servoLateralValue = document.getElementById('servoLateralValue');
-    const joystickPad = document.getElementById('joystickPad');
-    const joystickThumb = document.getElementById('joystickThumb');
-    const motorSlider = document.getElementById('motorSlider');
-    const motorValue = document.getElementById('motorValue');
-    const dirCw = document.getElementById('dirCw');
-    const dirCcw = document.getElementById('dirCcw');
-    const wsStatus = document.getElementById('wsStatus');
-    const nodeStatus = document.getElementById('nodeStatus');
-    const UPDOWN_LIMIT = 140;
-    const LATERAL_LIMIT = 80;
-    let currentDir = 0;
-    let currentServoUpdown = 0;
-    let currentServoLateral = 0;
-    let controlSendTimer = null;
-    let statusSynced = false;
-    let controlStateDirty = false;
-    const nodeUi = [1, 2, 3].map(function(nodeId) {
-      return {
-        id: nodeId,
-        button: document.getElementById('node' + nodeId + 'TestButton'),
-        light: document.getElementById('node' + nodeId + 'Light'),
-        connection: document.getElementById('node' + nodeId + 'Connection'),
-        message: document.getElementById('node' + nodeId + 'Message')
-      };
-    });
-
-    function clamp(value, min, max) {
-      return Math.min(max, Math.max(min, value));
-    }
-
-    function syncJoystickReadout() {
-      servoUpdownValue.textContent = currentServoUpdown;
-      servoLateralValue.textContent = currentServoLateral;
-    }
-
-    function renderJoystickThumb() {
-      const rect = joystickPad.getBoundingClientRect();
-      const thumbSize = joystickThumb.offsetWidth || 54;
-      const xRange = Math.max(0, rect.width / 2 - thumbSize / 2);
-      const yRange = Math.max(0, rect.height / 2 - thumbSize / 2);
-      const xOffset = clamp(currentServoLateral / LATERAL_LIMIT, -1, 1) * xRange;
-      const yOffset = clamp(-currentServoUpdown / UPDOWN_LIMIT, -1, 1) * yRange;
-      joystickThumb.style.transform = `translate(${xOffset}px, ${yOffset}px)`;
-    }
-
-    function setJoystickValues(updown, lateral, shouldSend) {
-      currentServoUpdown = clamp(parseInt(updown, 10) || 0, -UPDOWN_LIMIT, UPDOWN_LIMIT);
-      currentServoLateral = clamp(parseInt(lateral, 10) || 0, -LATERAL_LIMIT, LATERAL_LIMIT);
-      syncJoystickReadout();
-      renderJoystickThumb();
-
-      if (shouldSend) {
-        controlStateDirty = true;
-        if (statusSynced) {
-          scheduleControlStateSend();
-        }
-      }
-    }
-
-    function updateJoystickFromPointer(clientX, clientY, shouldSend) {
-      const rect = joystickPad.getBoundingClientRect();
-      const xHalf = Math.max(1, rect.width / 2);
-      const yHalf = Math.max(1, rect.height / 2);
-      const xNorm = clamp((clientX - (rect.left + xHalf)) / xHalf, -1, 1);
-      const yNorm = clamp((clientY - (rect.top + yHalf)) / yHalf, -1, 1);
-
-      setJoystickValues(Math.round(-yNorm * UPDOWN_LIMIT), Math.round(xNorm * LATERAL_LIMIT), shouldSend);
-    }
-
-    function buildControlState() {
-      return {
-        servoUpdown: currentServoUpdown,
-        servoLateral: currentServoLateral,
-        motorPwm: parseInt(motorSlider.value, 10),
-        motorDir: currentDir
-      };
-    }
-
-    function sendControlState() {
-      if (ws.readyState !== WebSocket.OPEN) {
-        return;
-      }
-
-      ws.send(JSON.stringify(buildControlState()));
-    }
-
-    function scheduleControlStateSend() {
-      sendControlState();
-      controlStateDirty = false;
-    }
-
-    function setDirButtons(dir) {
-      currentDir = dir;
-      dirCw.style.background = dir === 0 ? '#4CAF50' : '#555';
-      dirCcw.style.background = dir === 1 ? '#4CAF50' : '#555';
-    }
-
-    function setNodeUi(nodeId, connected, state, message) {
-      const node = nodeUi.find(function(entry) {
-        return entry.id === nodeId;
-      });
-
-      if (!node) {
-        return;
-      }
-
-      node.light.className = 'signal-light signal-' + state;
-      node.connection.textContent = connected ? 'Connected' : 'Disconnected';
-      node.connection.className = connected ? 'status-ok' : 'status-error';
-      node.message.textContent = message;
-    }
-
-    function requestNodeTest(nodeId) {
-      if (ws.readyState !== WebSocket.OPEN) {
-        setNodeUi(nodeId, false, 'error', 'WebSocket getrennt');
-        return;
-      }
-
-      setNodeUi(nodeId, true, 'sending', 'Signal wird gesendet...');
-      ws.send(JSON.stringify({cmd: 'nodeTest', nodeId: nodeId}));
-    }
-
-    // WebSocket verbunden
-    ws.onopen = function(event) {
-      console.log('WebSocket connected');
-      wsStatus.textContent = 'Connected';
-      wsStatus.className = 'status-ok';
-      ws.send(JSON.stringify({cmd: 'getStatus'}));
-    };
-
-    // WebSocket Fehler
-    ws.onerror = function(event) {
-      console.error('WebSocket error');
-      wsStatus.textContent = 'Error';
-      wsStatus.className = 'status-error';
-    };
-
-    // WebSocket Daten empfangen (Status vom Coordinator)
-    ws.onmessage = function(event) {
-      const data = JSON.parse(event.data);
-      // Server schickt Status zurück
-      const nodeCount = typeof data.nodeCount === 'number' ? data.nodeCount : 3;
-      const connectedNodes = typeof data.connectedNodes === 'number'
-        ? data.connectedNodes
-        : (Array.isArray(data.nodes) ? data.nodes.filter(function(node) { return !!node.connected; }).length : 0);
-      nodeStatus.textContent = connectedNodes + '/' + nodeCount + ' connected';
-      nodeStatus.className = connectedNodes > 0 ? 'status-ok' : 'status-error';
-
-          if (typeof data.servoUpdown === 'number' || typeof data.servoLateral === 'number') {
-            setJoystickValues(
-              typeof data.servoUpdown === 'number' ? data.servoUpdown : currentServoUpdown,
-              typeof data.servoLateral === 'number' ? data.servoLateral : currentServoLateral,
-              false
-            );
-      }
-
-      if (typeof data.motorPwm === 'number') {
-        motorSlider.value = data.motorPwm;
-        motorValue.textContent = data.motorPwm;
-      }
-
-      if (typeof data.motorDir === 'number') {
-        setDirButtons(data.motorDir);
-      }
-
-      if (Array.isArray(data.nodes)) {
-        data.nodes.forEach(function(node) {
-          setNodeUi(
-            node.id,
-            !!node.connected,
-            typeof node.testState === 'string' ? node.testState : 'idle',
-            typeof node.testMessage === 'string' ? node.testMessage : 'Bereit'
-          );
-        });
-      }
-
-      statusSynced = true;
-      if (controlStateDirty) {
-        scheduleControlStateSend();
-      }
-    };
-
-    motorSlider.addEventListener('input', function() {
-      motorValue.textContent = motorSlider.value;
-      controlStateDirty = true;
-      if (statusSynced) {
-        scheduleControlStateSend();
-      }
-    });
-
-    dirCw.addEventListener('click', function() {
-      setDirButtons(0);
-      controlStateDirty = true;
-      if (statusSynced) {
-        scheduleControlStateSend();
-      }
-    });
-
-    dirCcw.addEventListener('click', function() {
-      setDirButtons(1);
-      controlStateDirty = true;
-      if (statusSynced) {
-        scheduleControlStateSend();
-      }
-    });
-
-    nodeUi.forEach(function(node) {
-      node.button.addEventListener('click', function() {
-        requestNodeTest(node.id);
-      });
-    });
-
-    // Optional: Initial-Status abfragen
-    window.addEventListener('load', function() {
-      setDirButtons(0);
-      setJoystickValues(0, 0, false);
-      motorValue.textContent = motorSlider.value;
-      nodeUi.forEach(function(node) {
-        setNodeUi(node.id, false, 'idle', 'Bereit');
-      });
-    });
-
-    let joystickDragging = false;
-
-    joystickPad.addEventListener('pointerdown', function(event) {
-      joystickDragging = true;
-      joystickPad.setPointerCapture(event.pointerId);
-      updateJoystickFromPointer(event.clientX, event.clientY, true);
-      event.preventDefault();
-    });
-
-    joystickPad.addEventListener('pointermove', function(event) {
-      if (!joystickDragging) {
-        return;
-      }
-
-      updateJoystickFromPointer(event.clientX, event.clientY, true);
-      event.preventDefault();
-    });
-
-    function finishJoystickDrag(event) {
-      if (!joystickDragging) {
-        return;
-      }
-
-      joystickDragging = false;
-      if (joystickPad.hasPointerCapture(event.pointerId)) {
-        joystickPad.releasePointerCapture(event.pointerId);
-      }
-    }
-
-    joystickPad.addEventListener('pointerup', finishJoystickDrag);
-    joystickPad.addEventListener('pointercancel', finishJoystickDrag);
-    window.addEventListener('resize', renderJoystickThumb);
-
-    // Seite gegen Touch-Scroll sperren, Slider-Bewegung aber erlauben
-    document.addEventListener('touchmove', function(event) {
-      if (!event.target.closest('input[type="range"]')) {
-        event.preventDefault();
-      }
-    }, { passive: false });
-  </script>
-</body>
-</html>
-)rawliteral";
 }
 
 int16_t clampServoOffsetValue(int16_t servoOffsetValue, int16_t servoLimit) {
@@ -804,44 +431,22 @@ void servoTask(void *pvParameters) {
 }
 
 void applyDcMotorDriver(uint8_t pwmValue, uint8_t dirValue) {
-  currentMotorPwm = pwmValue;
-  currentMotorDir = dirValue ? 1 : 0;
+  SideControlState &left = getSideState(th::Side::Left);
+  left.motorPwm = pwmValue;
+  left.motorDir = dirValue ? 1 : 0;
 
   // Wahrheitstabelle:
   // PWM=Low -> Brake (DIR don't care)
   // PWM=High + DIR=Low -> CW
   // PWM=High + DIR=High -> CCW
-  if (currentMotorPwm == 0) {
+  if (left.motorPwm == 0) {
     digitalWrite(MOTOR_DIR_PIN, LOW);
     analogWrite(MOTOR_PWM_PIN, 0);
     return;
   }
 
-  digitalWrite(MOTOR_DIR_PIN, currentMotorDir == 0 ? LOW : HIGH);
-  analogWrite(MOTOR_PWM_PIN, currentMotorPwm);
-}
-
-bool parseJsonIntInRange(const char* buffer, const char* key, int minVal, int maxVal, int* outValue) {
-  char keyPattern[32];
-  snprintf(keyPattern, sizeof(keyPattern), "\"%s\"", key);
-
-  char *keyPos = strstr(buffer, keyPattern);
-  if (keyPos == NULL) {
-    return false;
-  }
-
-  char *colon = strchr(keyPos, ':');
-  if (colon == NULL) {
-    return false;
-  }
-
-  int value = atoi(colon + 1);
-  if (value < minVal || value > maxVal) {
-    return false;
-  }
-
-  *outValue = value;
-  return true;
+  digitalWrite(MOTOR_DIR_PIN, left.motorDir == 0 ? LOW : HIGH);
+  analogWrite(MOTOR_PWM_PIN, left.motorPwm);
 }
 
 // ============ WEBSOCKET EVENT HANDLER ============
@@ -863,9 +468,15 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
       
       Serial.printf("[WS] Received: %s\n", buffer);
 
+      if (strstr(buffer, "\"inputMode\":\"sequence\"") != nullptr) {
+        currentInputMode = th::InputMode::Sequence;
+      } else if (strstr(buffer, "\"inputMode\":\"manual\"") != nullptr) {
+        currentInputMode = th::InputMode::Manual;
+      }
+
       if (strstr(buffer, "\"nodeTest\"") != NULL) {
         int nodeId = -1;
-        if (parseJsonIntInRange(buffer, "nodeId", 1, NODE_COUNT, &nodeId)) {
+        if (th::parseJsonIntInRange(buffer, "nodeId", 1, NODE_COUNT, &nodeId)) {
           NodeSlot* node = getNodeSlotById((uint8_t)nodeId);
           if (node != nullptr) {
             sendNodeTestSignal(*node);
@@ -874,56 +485,218 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         return;
       }
 
-      int servoUpdownValue = currentServoUpdownValue;
-      int servoLateralValue = currentServoLateralValue;
-      bool servoUpdownChanged = false;
-      bool servoLateralChanged = false;
+      SideControlState leftNext = getSideStateConst(th::Side::Left);
+      SideControlState rightNext = getSideStateConst(th::Side::Right);
+      bool leftServoChanged = false;
+      bool rightServoChanged = false;
+      bool leftMotorChanged = false;
+      bool rightMotorChanged = false;
+      bool stateChanged = false;
+      th::Side servoSourceSide = th::Side::Unknown;
+      th::Side motorSourceSide = th::Side::Unknown;
 
-      if (parseJsonIntInRange(buffer, "servoUpdown", -updown_pos_limit, updown_pos_limit, &servoUpdownValue)) {
-        servoUpdownChanged = true;
+      bool parsedBoolValue = false;
+      bool syncOptionChanged = false;
+      if (th::parseJsonBool(buffer, "motorLink", &parsedBoolValue)) {
+        motorLinkEnabled = parsedBoolValue;
+        syncOptionChanged = true;
       }
-      if (parseJsonIntInRange(buffer, "servoLateral", -lateral_pos_limit, lateral_pos_limit, &servoLateralValue)) {
-        servoLateralChanged = true;
+      if (th::parseJsonBool(buffer, "motorMirror", &parsedBoolValue)) {
+        motorMirrorEnabled = parsedBoolValue;
+        syncOptionChanged = true;
+      }
+      if (th::parseJsonBool(buffer, "eyeballLink", &parsedBoolValue)) {
+        eyeballLinkEnabled = parsedBoolValue;
+        syncOptionChanged = true;
+      }
+      if (th::parseJsonBool(buffer, "eyeballMirror", &parsedBoolValue)) {
+        eyeballMirrorEnabled = parsedBoolValue;
+        syncOptionChanged = true;
       }
 
-      if (servoUpdownChanged && servoUpdownValue != currentServoUpdownValue) {
-        Serial.printf("[SERVO UPDOWN] %d -> %d\n", currentServoUpdownValue, servoUpdownValue);
-        applyServoFromUiValue((int16_t)servoUpdownValue, SERVO_UPDOWN_ID, currentServoUpdownValue, updown_pos_limit);
+      if (!motorLinkEnabled) {
+        motorMirrorEnabled = false;
+      }
+      if (!eyeballLinkEnabled) {
+        eyeballMirrorEnabled = false;
       }
 
-      if (servoLateralChanged && servoLateralValue != currentServoLateralValue) {
-        Serial.printf("[SERVO LATERAL] %d -> %d\n", currentServoLateralValue, servoLateralValue);
-        applyServoFromUiValue((int16_t)servoLateralValue, SERVO_LATERAL_ID, currentServoLateralValue, lateral_pos_limit);
+      int tempValue = 0;
+      if (th::parseJsonIntInRange(buffer, "leftServoUpdown", -updown_pos_limit, updown_pos_limit, &tempValue)) {
+        leftNext.servoUpdown = (int16_t)tempValue;
+        leftServoChanged = true;
+        servoSourceSide = th::Side::Left;
+      }
+      if (th::parseJsonIntInRange(buffer, "leftServoLateral", -lateral_pos_limit, lateral_pos_limit, &tempValue)) {
+        leftNext.servoLateral = (int16_t)tempValue;
+        leftServoChanged = true;
+        servoSourceSide = th::Side::Left;
+      }
+      if (th::parseJsonIntInRange(buffer, "rightServoUpdown", -updown_pos_limit, updown_pos_limit, &tempValue)) {
+        rightNext.servoUpdown = (int16_t)tempValue;
+        rightServoChanged = true;
+        servoSourceSide = th::Side::Right;
+      }
+      if (th::parseJsonIntInRange(buffer, "rightServoLateral", -lateral_pos_limit, lateral_pos_limit, &tempValue)) {
+        rightNext.servoLateral = (int16_t)tempValue;
+        rightServoChanged = true;
+        servoSourceSide = th::Side::Right;
       }
 
-      int newMotorPwm = currentMotorPwm;
-      int newMotorDir = currentMotorDir;
-      bool motorChanged = false;
+      // Legacy key fallback keeps old single-side clients functional.
+      if (th::parseJsonIntInRange(buffer, "servoUpdown", -updown_pos_limit, updown_pos_limit, &tempValue)) {
+        leftNext.servoUpdown = (int16_t)tempValue;
+        leftServoChanged = true;
+        servoSourceSide = th::Side::Left;
+      }
+      if (th::parseJsonIntInRange(buffer, "servoLateral", -lateral_pos_limit, lateral_pos_limit, &tempValue)) {
+        leftNext.servoLateral = (int16_t)tempValue;
+        leftServoChanged = true;
+        servoSourceSide = th::Side::Left;
+      }
+
+      const SideControlState &leftCurrentBeforeServo = getSideStateConst(th::Side::Left);
+      const SideControlState &rightCurrentBeforeServo = getSideStateConst(th::Side::Right);
+      const bool leftServoEffectivelyChanged = leftServoChanged
+        && (leftNext.servoUpdown != leftCurrentBeforeServo.servoUpdown || leftNext.servoLateral != leftCurrentBeforeServo.servoLateral);
+      const bool rightServoEffectivelyChanged = rightServoChanged
+        && (rightNext.servoUpdown != rightCurrentBeforeServo.servoUpdown || rightNext.servoLateral != rightCurrentBeforeServo.servoLateral);
+
+      if (leftServoEffectivelyChanged && !rightServoEffectivelyChanged) {
+        servoSourceSide = th::Side::Left;
+      } else if (rightServoEffectivelyChanged && !leftServoEffectivelyChanged) {
+        servoSourceSide = th::Side::Right;
+      }
+
+      if (eyeballLinkEnabled && (leftServoChanged || rightServoChanged || syncOptionChanged)) {
+        if (servoSourceSide == th::Side::Unknown) {
+          servoSourceSide = th::Side::Left;
+        }
+
+        if (servoSourceSide == th::Side::Left) {
+          rightNext.servoUpdown = leftNext.servoUpdown;
+          rightNext.servoLateral = eyeballMirrorEnabled ? mirrorEyeballLateral(leftNext.servoLateral) : leftNext.servoLateral;
+          rightServoChanged = true;
+        } else {
+          leftNext.servoUpdown = rightNext.servoUpdown;
+          leftNext.servoLateral = eyeballMirrorEnabled ? mirrorEyeballLateral(rightNext.servoLateral) : rightNext.servoLateral;
+          leftServoChanged = true;
+        }
+      }
+
+      if (leftServoChanged) {
+        SideControlState &leftCurrent = getSideState(th::Side::Left);
+        if (leftNext.servoUpdown != leftCurrent.servoUpdown) {
+          Serial.printf("[SERVO LEFT UPDOWN] %d -> %d\n", leftCurrent.servoUpdown, leftNext.servoUpdown);
+          applyServoFromUiValue(leftNext.servoUpdown, SERVO_UPDOWN_ID, leftCurrent.servoUpdown, updown_pos_limit);
+        }
+        if (leftNext.servoLateral != leftCurrent.servoLateral) {
+          Serial.printf("[SERVO LEFT LATERAL] %d -> %d\n", leftCurrent.servoLateral, leftNext.servoLateral);
+          applyServoFromUiValue(leftNext.servoLateral, SERVO_LATERAL_ID, leftCurrent.servoLateral, lateral_pos_limit);
+        }
+        sendServoToRemoteSatelliteNodes(th::Side::Left, leftCurrent.servoUpdown, leftCurrent.servoLateral);
+        stateChanged = true;
+      }
+
+      if (rightServoChanged) {
+        SideControlState &rightCurrent = getSideState(th::Side::Right);
+        rightCurrent.servoUpdown = clampServoOffsetValue(rightNext.servoUpdown, updown_pos_limit);
+        rightCurrent.servoLateral = clampServoOffsetValue(rightNext.servoLateral, lateral_pos_limit);
+        sendServoToRemoteSatelliteNodes(th::Side::Right, rightCurrent.servoUpdown, rightCurrent.servoLateral);
+        stateChanged = true;
+      }
+
+      int newLeftMotorPwm = getSideStateConst(th::Side::Left).motorPwm;
+      int newLeftMotorDir = getSideStateConst(th::Side::Left).motorDir;
+      int newRightMotorPwm = getSideStateConst(th::Side::Right).motorPwm;
+      int newRightMotorDir = getSideStateConst(th::Side::Right).motorDir;
       int parsedMotorPwm = -1;
       int parsedMotorDir = -1;
 
-      if (parseJsonIntInRange(buffer, "motorPwm", 0, 255, &parsedMotorPwm)) {
-        newMotorPwm = parsedMotorPwm;
-        motorChanged = true;
+      if (th::parseJsonIntInRange(buffer, "leftMotorPwm", 0, 255, &parsedMotorPwm)) {
+        newLeftMotorPwm = parsedMotorPwm;
+        leftMotorChanged = true;
+        motorSourceSide = th::Side::Left;
       }
-      if (parseJsonIntInRange(buffer, "motorDir", 0, 1, &parsedMotorDir)) {
-        newMotorDir = parsedMotorDir;
-        motorChanged = true;
+      if (th::parseJsonIntInRange(buffer, "leftMotorDir", 0, 1, &parsedMotorDir)) {
+        newLeftMotorDir = parsedMotorDir;
+        leftMotorChanged = true;
+        motorSourceSide = th::Side::Left;
+      }
+      if (th::parseJsonIntInRange(buffer, "rightMotorPwm", 0, 255, &parsedMotorPwm)) {
+        newRightMotorPwm = parsedMotorPwm;
+        rightMotorChanged = true;
+        motorSourceSide = th::Side::Right;
+      }
+      if (th::parseJsonIntInRange(buffer, "rightMotorDir", 0, 1, &parsedMotorDir)) {
+        newRightMotorDir = parsedMotorDir;
+        rightMotorChanged = true;
+        motorSourceSide = th::Side::Right;
       }
 
-      if (motorChanged) {
-        if ((uint8_t)newMotorPwm != currentMotorPwm || (uint8_t)newMotorDir != currentMotorDir) {
-          Serial.printf("[MOTOR] PWM=%d DIR=%d\n", newMotorPwm, newMotorDir);
-        }
-        applyDcMotorDriver((uint8_t)newMotorPwm, (uint8_t)newMotorDir);
+      if (th::parseJsonIntInRange(buffer, "motorPwm", 0, 255, &parsedMotorPwm)) {
+        newLeftMotorPwm = parsedMotorPwm;
+        leftMotorChanged = true;
+        motorSourceSide = th::Side::Left;
+      }
+      if (th::parseJsonIntInRange(buffer, "motorDir", 0, 1, &parsedMotorDir)) {
+        newLeftMotorDir = parsedMotorDir;
+        leftMotorChanged = true;
+        motorSourceSide = th::Side::Left;
+      }
 
-        char tcpMsg[20];
-        snprintf(tcpMsg, sizeof(tcpMsg), "M:%d\n", currentMotorPwm);
-        for (uint8_t index = 0; index < NODE_COUNT; ++index) {
-          if (nodeSlots[index].connected && nodeSlots[index].client->connected()) {
-            nodeSlots[index].client->print(tcpMsg);
-          }
+      const SideControlState &leftCurrentBeforeMotor = getSideStateConst(th::Side::Left);
+      const SideControlState &rightCurrentBeforeMotor = getSideStateConst(th::Side::Right);
+      const bool leftMotorEffectivelyChanged = leftMotorChanged
+        && ((uint8_t)newLeftMotorPwm != leftCurrentBeforeMotor.motorPwm || (uint8_t)newLeftMotorDir != leftCurrentBeforeMotor.motorDir);
+      const bool rightMotorEffectivelyChanged = rightMotorChanged
+        && ((uint8_t)newRightMotorPwm != rightCurrentBeforeMotor.motorPwm || (uint8_t)newRightMotorDir != rightCurrentBeforeMotor.motorDir);
+
+      if (leftMotorEffectivelyChanged && !rightMotorEffectivelyChanged) {
+        motorSourceSide = th::Side::Left;
+      } else if (rightMotorEffectivelyChanged && !leftMotorEffectivelyChanged) {
+        motorSourceSide = th::Side::Right;
+      }
+
+      if (motorLinkEnabled && (leftMotorChanged || rightMotorChanged || syncOptionChanged)) {
+        if (motorSourceSide == th::Side::Unknown) {
+          motorSourceSide = th::Side::Left;
         }
+
+        if (motorSourceSide == th::Side::Left) {
+          newRightMotorPwm = newLeftMotorPwm;
+          newRightMotorDir = motorMirrorEnabled ? mirroredMotorDir((uint8_t)newLeftMotorDir) : newLeftMotorDir;
+          rightMotorChanged = true;
+        } else {
+          newLeftMotorPwm = newRightMotorPwm;
+          newLeftMotorDir = motorMirrorEnabled ? mirroredMotorDir((uint8_t)newRightMotorDir) : newRightMotorDir;
+          leftMotorChanged = true;
+        }
+      }
+
+      if (leftMotorChanged) {
+        const SideControlState &leftBefore = getSideStateConst(th::Side::Left);
+        if ((uint8_t)newLeftMotorPwm != leftBefore.motorPwm || (uint8_t)newLeftMotorDir != leftBefore.motorDir) {
+          Serial.printf("[MOTOR LEFT] PWM=%d DIR=%d\n", newLeftMotorPwm, newLeftMotorDir);
+        }
+        applyDcMotorDriver((uint8_t)newLeftMotorPwm, (uint8_t)newLeftMotorDir);
+        sendMotorToRemoteBaseNodes(th::Side::Left, getSideStateConst(th::Side::Left).motorPwm, getSideStateConst(th::Side::Left).motorDir);
+        stateChanged = true;
+      }
+
+      if (rightMotorChanged) {
+        SideControlState &rightCurrent = getSideState(th::Side::Right);
+        if ((uint8_t)newRightMotorPwm != rightCurrent.motorPwm || (uint8_t)newRightMotorDir != rightCurrent.motorDir) {
+          Serial.printf("[MOTOR RIGHT] PWM=%d DIR=%d\n", newRightMotorPwm, newRightMotorDir);
+        }
+        rightCurrent.motorPwm = (uint8_t)newRightMotorPwm;
+        rightCurrent.motorDir = (uint8_t)newRightMotorDir;
+        sendMotorToRemoteBaseNodes(th::Side::Right, rightCurrent.motorPwm, rightCurrent.motorDir);
+        stateChanged = true;
+      }
+
+      if (stateChanged || syncOptionChanged) {
+        broadcastStatus();
       }
 
       if (strstr(buffer, "\"getStatus\"") != NULL) {
@@ -949,18 +722,15 @@ void setup() {
   Serial1.begin(SERVO_BAUD, SERIAL_8N1, SERVO_UART_RX_PIN, SERVO_UART_TX_PIN);
   scServo.pSerial = &Serial1;
   delay(100);
-  applyServoFromUiValue(currentServoUpdownValue, SERVO_UPDOWN_ID, currentServoUpdownValue, updown_pos_limit);
-  applyServoFromUiValue(currentServoLateralValue, SERVO_LATERAL_ID, currentServoLateralValue, lateral_pos_limit);
+  SideControlState &left = getSideState(th::Side::Left);
+  applyServoFromUiValue(left.servoUpdown, SERVO_UPDOWN_ID, left.servoUpdown, updown_pos_limit);
+  applyServoFromUiValue(left.servoLateral, SERVO_LATERAL_ID, left.servoLateral, lateral_pos_limit);
   // Start servo task to handle actual SCServo writes outside network/event context
   xTaskCreatePinnedToCore(servoTask, "servoTask", 4096, NULL, 1, NULL, 0);
   Serial.printf("[SERVO] Updown ID %u, Lateral ID %u\n", SERVO_UPDOWN_ID, SERVO_LATERAL_ID);
 
   // WiFi Access Point starten
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(WIFI_SSID, WIFI_PASS);
-  IPAddress apIP = WiFi.softAPIP();
-  Serial.printf("[WiFi] AP started: SSID='%s', Pass='%s', IP=%s\n", 
-                WIFI_SSID, WIFI_PASS, apIP.toString().c_str());
+  th::startAccessPoint(WIFI_SSID, WIFI_PASS);
 
   // WebSocket initialisieren
   ws.onEvent(onWebSocketEvent);
@@ -968,7 +738,7 @@ void setup() {
 
   // HTTP Endpoints
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", getWebPage());
+    request->send(200, "text/html", th::getWebPageHtml());
   });
 
   // Server starten
