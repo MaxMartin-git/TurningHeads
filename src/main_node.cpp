@@ -16,6 +16,8 @@ const char* WIFI_PASS = "TurningHeads123";   // Muss gleich wie Coordinator sein
 const char* COORDINATOR_IP = "192.168.4.1";  // Standard IP des Coordinators
 const uint16_t COORDINATOR_PORT = 5000 + NODE_ID;  // Je Node ein eigener Port
 const uint16_t PWM_PIN = 3;                  // PWM fuer Motor an GPIO3
+const uint16_t RELAY_LIGHT_PIN = 5;          // Relay control pin for satellite light output
+const bool RELAY_ACTIVE_HIGH = true;
 
 // ============ GLOBALE VARIABLEN ============
 WiFiClient tcpClient;
@@ -23,6 +25,7 @@ uint8_t currentMotorValue = 0;
 uint8_t currentMotorDir = 0;
 int16_t currentServoUpdown = 0;
 int16_t currentServoLateral = 0;
+bool currentLightOn = false;
 bool nodeReadySent = false;
 uint32_t lastHeartbeatSentMs = 0;
 const uint32_t HEARTBEAT_INTERVAL_MS = 1000;
@@ -33,6 +36,13 @@ void applyDcMotor(uint8_t pwmValue, uint8_t dirValue) {
   currentMotorValue = pwmValue;
   currentMotorDir = dirValue ? 1 : 0;
   analogWrite(PWM_PIN, currentMotorValue);
+}
+
+void applyLightRelay(bool lightOn) {
+  currentLightOn = lightOn;
+  int relayLevel = (RELAY_ACTIVE_HIGH ? HIGH : LOW);
+  int relayOffLevel = (RELAY_ACTIVE_HIGH ? LOW : HIGH);
+  digitalWrite(RELAY_LIGHT_PIN, currentLightOn ? relayLevel : relayOffLevel);
 }
 
 // ============ SETUP ============
@@ -47,6 +57,12 @@ void setup() {
     Serial.printf("[PWM] Initialized on GPIO%d\n", PWM_PIN);
   } else {
     Serial.println("[PWM] Skipped (no DC motor capability)");
+  }
+
+  if (th::isSatelliteRole(thisNodeProfile.role)) {
+    pinMode(RELAY_LIGHT_PIN, OUTPUT);
+    applyLightRelay(false);
+    Serial.printf("[LIGHT] Relay output initialized on GPIO%d\n", RELAY_LIGHT_PIN);
   }
 
   // Verbindung zum Coordinator-WLAN
@@ -137,6 +153,20 @@ void loop() {
                         currentServoLateral);
         } else {
           Serial.printf("[SERVO] Ignored (node role %s)\n", th::toString(thisNodeProfile.role));
+        }
+        continue;
+      }
+
+      int lightState = -1;
+      if (th::tryParseLightCommand(line, &lightState)) {
+        if (th::isSatelliteRole(thisNodeProfile.role)) {
+          bool requestedLightOn = (lightState != 0);
+          if (requestedLightOn != currentLightOn) {
+            applyLightRelay(requestedLightOn);
+            Serial.printf("[LIGHT %s] %s\n", th::toString(thisNodeProfile.side), currentLightOn ? "ON" : "OFF");
+          }
+        } else {
+          Serial.printf("[LIGHT] Ignored (node role %s)\n", th::toString(thisNodeProfile.role));
         }
         continue;
       }

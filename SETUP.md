@@ -20,12 +20,12 @@
 
 ### 1. **Coordinator Flashen** (aktueller Ordner)
 ```bash
-platformio run -e coordinator --target upload
+platformio run -e base_L_as_coordinator --target upload
 ```
 
 ### 2. **Node Flashen** (neuer Ordner)
 ```bash
-platformio run -e node1 --target upload
+platformio run -e Satellite_L --target upload
 ```
 
 ### 3. **Servo-Mitte speichern**
@@ -35,7 +35,7 @@ platformio run -e servo_center_setter --target upload
 
 Nach dem Flashen den Servo von Hand in die gewünschte Mittelposition bringen, dann einschalten. Das Skript speichert die aktuelle Stellung automatisch beim Start und fährt den Servo dabei nicht an.
 
-Oder in VS Code oben rechts die Umgebung (`[coordinator]` oder `[node]`) wechseln und `Upload` klicken.
+Oder in VS Code oben rechts die Umgebung (`[base_L_as_coordinator]` oder `[Satellite_L]`) wechseln und `Upload` klicken.
 
 ## So funktioniert es
 
@@ -97,10 +97,10 @@ Smartphone WebSocket       Coordinator         TCP         Node
 ### Node verbindet sich nicht zum Coordinator
 1. Prüfe SSID und Passwort in `src_node/main.cpp` 
 2. Prüfe IP des Coordinators (sollte 192.168.4.1 sein)
-3. Serielle Ausgabe der Node anschauen: `platformio device monitor -e node1`
+3. Serielle Ausgabe der Node anschauen: `platformio device monitor -e Satellite_L`
 
 ### Smartphone kann sich nicht zu `TurningHeads` verbinden
-1. Serielle Monitor Coordinator: `platformio device monitor -e coordinator`
+1. Serielle Monitor Coordinator: `platformio device monitor -e base_L_as_coordinator`
 2. Suche nach `[WiFi] AP started`
 3. Wenn nicht, prüfe dass Coordinator hochgefahren ist
 

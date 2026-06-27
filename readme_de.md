@@ -43,8 +43,10 @@ Gemeinsame Rollen- und Capabilities-Definitionen liegen unter `src/shared/`.
 1. Installiere PlatformIO in VS Code.
 2. Öffne diesen Projektordner in VS Code.
 3. Wähle die gewünschte Umgebung in `platformio.ini`:
-   - `coordinator` - Koordinator-Firmware mit Weboberfläche und Servo-Steuerung
-   - `node1` - Knoten-Firmware für die Motorsteuerung (NODE_ID=1)
+   - `base_L_as_coordinator` - Base_L-Koordinator-Firmware mit Weboberfläche und Servo-Steuerung
+   - `Satellite_L` - Satellite_L-Firmware (NODE_ID=1)
+   - `Base_R` - Base_R-Firmware (NODE_ID=2)
+   - `Satellite_R` - Satellite_R-Firmware (NODE_ID=3)
    - `servo_id_setter` - Hilfsprogramm zum Konfigurieren der Servo-ID
    - `servo_id_reader` - Hilfsprogramm zum Lesen der Servo-ID
    - `servo_center_setter` - Hilfsprogramm zur Kalibrierung des Servo-Mittelpunkts
@@ -53,14 +55,14 @@ Gemeinsame Rollen- und Capabilities-Definitionen liegen unter `src/shared/`.
 
 ## Verwendung des Koordinators
 
-1. Flashe `src/main.cpp` mit der Umgebung `coordinator`.
+1. Flashe `src/main.cpp` mit der Umgebung `base_L_as_coordinator`.
 2. Schließe das Board an die Stromversorgung an und verbinde dich mit dem WiFi-AP `ESP_TH` mit dem Passwort `TurningHeads123`.
 3. Öffne einen Browser und rufe `http://192.168.4.1/` auf.
 4. Verwende die Left/Right-Bedienelemente auf der Oberfläche, um beide Seiten getrennt zu steuern.
 
 ## Verwendung des Knotens
 
-1. Flashe `src/main_node.cpp` mit einer der Node-Umgebungen (`node1`, `node2`, `node3`).
+1. Flashe `src/main_node.cpp` mit einer der Node-Umgebungen (`Satellite_L`, `Base_R`, `Satellite_R`).
 2. Konfiguriere die Verkabelung des Knotens so, dass `GPIO3` PWM an den Motor-Treiber liefert.
 3. Verbinde den Knoten mit dem WiFi-AP des Koordinators.
 4. Der Knoten verbindet sich auf seinen dedizierten Port (`5001`, `5002` oder `5003`) und führt nur rollenspezifische Befehle aus:

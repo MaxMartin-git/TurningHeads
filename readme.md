@@ -45,8 +45,10 @@ All shared role/capability definitions live under `src/shared/`.
 1. Install PlatformIO in VS Code.
 2. Open this project folder in VS Code.
 3. Select the desired environment in `platformio.ini`:
-   - `coordinator` - coordinator firmware with web UI and servo control
-   - `node1` - node firmware for motor control (NODE_ID=1)
+   - `base_L_as_coordinator` - Base_L coordinator firmware with web UI and servo control
+   - `Satellite_L` - Satellite_L firmware (NODE_ID=1)
+   - `Base_R` - Base_R firmware (NODE_ID=2)
+   - `Satellite_R` - Satellite_R firmware (NODE_ID=3)
    - `servo_id_setter` - servo ID configuration helper
    - `servo_id_reader` - servo ID reader helper
    - `servo_center_setter` - servo center calibration helper
@@ -55,14 +57,14 @@ All shared role/capability definitions live under `src/shared/`.
 
 ## Coordinator Usage
 
-1. Flash `src/main.cpp` with the `coordinator` environment.
+1. Flash `src/main.cpp` with the `base_L_as_coordinator` environment.
 2. Power the board and connect to the WiFi AP `ESP_TH` with password `TurningHeads123`.
 3. Open a browser and go to `http://192.168.4.1/`.
 4. Use the on-screen Left/Right controls to drive each side independently.
 
 ## Node Usage
 
-1. Flash `src/main_node.cpp` with one of the node environments (`node1`, `node2`, `node3`).
+1. Flash `src/main_node.cpp` with one of the node environments (`Satellite_L`, `Base_R`, `Satellite_R`).
 2. Configure the node wiring so `GPIO3` provides PWM to the motor driver.
 3. Connect the node to the coordinator WiFi AP.
 4. The node will attempt to connect to its dedicated port (`5001`, `5002`, or `5003`) and only execute role-appropriate commands:

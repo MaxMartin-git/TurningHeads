@@ -43,11 +43,12 @@ struct SideControlState {
   uint8_t motorDir;
   int16_t servoUpdown;
   int16_t servoLateral;
+  bool lightOn;
 };
 
 SideControlState sideState[2] = {
-  {0, 0, 0, 0},  // Left side (local base/coordinator)
-  {0, 0, 0, 0}   // Right side (remote base/satellite)
+  {0, 0, 0, 0, false},  // Left side (local base/coordinator)
+  {0, 0, 0, 0, false}   // Right side (remote base/satellite)
 };
 
 bool motorLinkEnabled = true;
@@ -181,6 +182,10 @@ String buildStatusMessage() {
   statusMsg += right.motorPwm;
   statusMsg += ",\"rightMotorDir\":";
   statusMsg += right.motorDir;
+  statusMsg += ",\"leftLight\":";
+  statusMsg += left.lightOn ? "true" : "false";
+  statusMsg += ",\"rightLight\":";
+  statusMsg += right.lightOn ? "true" : "false";
   statusMsg += ",\"motorLink\":";
   statusMsg += motorLinkEnabled ? "true" : "false";
   statusMsg += ",\"motorMirror\":";
@@ -255,6 +260,21 @@ void sendMotorToRemoteBaseNodes(th::Side side, uint8_t pwmValue, uint8_t dirValu
 void sendServoToRemoteSatelliteNodes(th::Side side, int16_t updownValue, int16_t lateralValue) {
   char tcpMsg[32];
   th::buildServoCommand(updownValue, lateralValue, tcpMsg, sizeof(tcpMsg));
+
+  for (uint8_t index = 0; index < NODE_COUNT; ++index) {
+    NodeSlot &node = nodeSlots[index];
+    if (!th::isSatelliteRole(node.profile.role) || !node.profile.capabilities.hasEyeballServos || node.profile.side != side) {
+      continue;
+    }
+    if (node.connected && node.client->connected()) {
+      node.client->print(tcpMsg);
+    }
+  }
+}
+
+void sendLightToRemoteSatelliteNodes(th::Side side, bool lightOn) {
+  char tcpMsg[12];
+  th::buildLightCommand(lightOn, tcpMsg, sizeof(tcpMsg));
 
   for (uint8_t index = 0; index < NODE_COUNT; ++index) {
     NodeSlot &node = nodeSlots[index];
@@ -491,6 +511,8 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
       bool rightServoChanged = false;
       bool leftMotorChanged = false;
       bool rightMotorChanged = false;
+      bool leftLightChanged = false;
+      bool rightLightChanged = false;
       bool stateChanged = false;
       th::Side servoSourceSide = th::Side::Unknown;
       th::Side motorSourceSide = th::Side::Unknown;
@@ -512,6 +534,14 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
       if (th::parseJsonBool(buffer, "eyeballMirror", &parsedBoolValue)) {
         eyeballMirrorEnabled = parsedBoolValue;
         syncOptionChanged = true;
+      }
+      if (th::parseJsonBool(buffer, "leftLight", &parsedBoolValue)) {
+        leftNext.lightOn = parsedBoolValue;
+        leftLightChanged = true;
+      }
+      if (th::parseJsonBool(buffer, "rightLight", &parsedBoolValue)) {
+        rightNext.lightOn = parsedBoolValue;
+        rightLightChanged = true;
       }
 
       if (!motorLinkEnabled) {
@@ -604,6 +634,26 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         rightCurrent.servoLateral = clampServoOffsetValue(rightNext.servoLateral, lateral_pos_limit);
         sendServoToRemoteSatelliteNodes(th::Side::Right, rightCurrent.servoUpdown, rightCurrent.servoLateral);
         stateChanged = true;
+      }
+
+      if (leftLightChanged) {
+        SideControlState &leftCurrent = getSideState(th::Side::Left);
+        if (leftCurrent.lightOn != leftNext.lightOn) {
+          leftCurrent.lightOn = leftNext.lightOn;
+          Serial.printf("[LIGHT LEFT] %s\n", leftCurrent.lightOn ? "ON" : "OFF");
+          sendLightToRemoteSatelliteNodes(th::Side::Left, leftCurrent.lightOn);
+          stateChanged = true;
+        }
+      }
+
+      if (rightLightChanged) {
+        SideControlState &rightCurrent = getSideState(th::Side::Right);
+        if (rightCurrent.lightOn != rightNext.lightOn) {
+          rightCurrent.lightOn = rightNext.lightOn;
+          Serial.printf("[LIGHT RIGHT] %s\n", rightCurrent.lightOn ? "ON" : "OFF");
+          sendLightToRemoteSatelliteNodes(th::Side::Right, rightCurrent.lightOn);
+          stateChanged = true;
+        }
       }
 
       int newLeftMotorPwm = getSideStateConst(th::Side::Left).motorPwm;

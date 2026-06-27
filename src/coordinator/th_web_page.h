@@ -214,6 +214,51 @@ inline const char* getWebPageHtml() {
       display: flex;
       justify-content: center;
     }
+    .light-row {
+      margin-top: 8px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: #d7d7d7;
+    }
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 42px;
+      height: 22px;
+    }
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .switch-slider {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background-color: #5e5e5e;
+      transition: 0.2s;
+      border-radius: 22px;
+    }
+    .switch-slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 2px;
+      top: 2px;
+      background-color: #f2fff2;
+      transition: 0.2s;
+      border-radius: 50%;
+    }
+    .switch input:checked + .switch-slider {
+      background-color: #59cb5e;
+    }
+    .switch input:checked + .switch-slider:before {
+      transform: translateX(20px);
+    }
     .btn {
       border: 0;
       border-radius: 6px;
@@ -316,6 +361,13 @@ inline const char* getWebPageHtml() {
         <div class="stop-row">
           <button id="leftStopButton" class="btn" type="button">Stop</button>
         </div>
+        <div class="light-row">
+          <span>Light</span>
+          <label class="switch" for="leftLightSwitch">
+            <input type="checkbox" id="leftLightSwitch">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
       </div>
 
       <div class="sync-card">
@@ -365,12 +417,19 @@ inline const char* getWebPageHtml() {
         <div class="stop-row">
           <button id="rightStopButton" class="btn" type="button">Stop</button>
         </div>
+        <div class="light-row">
+          <span>Light</span>
+          <label class="switch" for="rightLightSwitch">
+            <input type="checkbox" id="rightLightSwitch">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
       </div>
     </div>
 
     <div class="node-grid">
       <div class="node-card">
-        <div id="node1Header" class="node-card-header">Node 1</div>
+        <div id="node1Header" class="node-card-header">Satellite_L</div>
         <div class="node-card-status">
           <span id="node1Light" class="signal-light signal-idle"></span>
           <span id="node1Connection">Disconnected</span>
@@ -379,7 +438,7 @@ inline const char* getWebPageHtml() {
         <div id="node1Message" class="node-card-message">Ready</div>
       </div>
       <div class="node-card">
-        <div id="node2Header" class="node-card-header">Node 2</div>
+        <div id="node2Header" class="node-card-header">Base_R</div>
         <div class="node-card-status">
           <span id="node2Light" class="signal-light signal-idle"></span>
           <span id="node2Connection">Disconnected</span>
@@ -388,7 +447,7 @@ inline const char* getWebPageHtml() {
         <div id="node2Message" class="node-card-message">Ready</div>
       </div>
       <div class="node-card">
-        <div id="node3Header" class="node-card-header">Node 3</div>
+        <div id="node3Header" class="node-card-header">Satellite_R</div>
         <div class="node-card-status">
           <span id="node3Light" class="signal-light signal-idle"></span>
           <span id="node3Connection">Disconnected</span>
@@ -433,6 +492,7 @@ inline const char* getWebPageHtml() {
         motorAxis: 0,
         motorPwm: 0,
         motorDir: 0,
+        lightOn: false,
         pad: document.getElementById('leftJoystickPad'),
         thumb: document.getElementById('leftJoystickThumb'),
         updownText: document.getElementById('leftServoUpdownValue'),
@@ -440,6 +500,7 @@ inline const char* getWebPageHtml() {
         motorSlider: document.getElementById('leftMotorSlider'),
         motorValue: document.getElementById('leftMotorValue'),
         stopButton: document.getElementById('leftStopButton'),
+        lightSwitch: document.getElementById('leftLightSwitch'),
         dragging: false
       },
       right: {
@@ -448,6 +509,7 @@ inline const char* getWebPageHtml() {
         motorAxis: 0,
         motorPwm: 0,
         motorDir: 0,
+        lightOn: false,
         pad: document.getElementById('rightJoystickPad'),
         thumb: document.getElementById('rightJoystickThumb'),
         updownText: document.getElementById('rightServoUpdownValue'),
@@ -455,6 +517,7 @@ inline const char* getWebPageHtml() {
         motorSlider: document.getElementById('rightMotorSlider'),
         motorValue: document.getElementById('rightMotorValue'),
         stopButton: document.getElementById('rightStopButton'),
+        lightSwitch: document.getElementById('rightLightSwitch'),
         dragging: false
       }
     };
@@ -485,6 +548,7 @@ inline const char* getWebPageHtml() {
       }
       side.motorSlider.value = side.motorAxis;
       updateRotationSliderVisual(side);
+      side.lightSwitch.checked = !!side.lightOn;
     }
 
     function updateRotationSliderVisual(side) {
@@ -576,6 +640,8 @@ inline const char* getWebPageHtml() {
         rightServoLateral: sides.right.servoLateral,
         rightMotorPwm: sides.right.motorPwm,
         rightMotorDir: sides.right.motorDir,
+        leftLight: sides.left.lightOn,
+        rightLight: sides.right.lightOn,
         motorLink: syncOptions.motorLink,
         motorMirror: syncOptions.motorMirror,
         eyeballLink: syncOptions.eyeballLink,
@@ -616,7 +682,7 @@ inline const char* getWebPageHtml() {
       controlStateDirty = false;
     }
 
-    function setNodeUi(nodeId, connected, state, message) {
+    function setNodeUi(nodeId, connected, state, message, label) {
       const node = nodeUi.find(function(entry) {
         return entry.id === nodeId;
       });
@@ -626,6 +692,9 @@ inline const char* getWebPageHtml() {
       }
 
       node.light.className = 'signal-light signal-' + state;
+      if (typeof label === 'string' && label.length > 0) {
+        node.header.textContent = label;
+      }
       node.connection.textContent = connected ? 'Connected' : 'Disconnected';
       node.connection.className = connected ? 'status-ok' : 'status-error';
       node.message.textContent = message;
@@ -702,6 +771,14 @@ inline const char* getWebPageHtml() {
         sides.right.motorDir = data.rightMotorDir;
         setHeadRotationAxis(sides.right, motorCommandToAxis(sides.right.motorPwm, data.rightMotorDir));
       }
+      if (typeof data.leftLight === 'boolean') {
+        sides.left.lightOn = data.leftLight;
+        syncSideReadout(sides.left);
+      }
+      if (typeof data.rightLight === 'boolean') {
+        sides.right.lightOn = data.rightLight;
+        syncSideReadout(sides.right);
+      }
 
       if (typeof data.motorLink === 'boolean') {
         syncOptions.motorLink = data.motorLink;
@@ -727,7 +804,8 @@ inline const char* getWebPageHtml() {
             node.id,
             !!node.connected,
             typeof node.testState === 'string' ? node.testState : 'idle',
-            typeof node.testMessage === 'string' ? node.testMessage : 'Ready'
+            typeof node.testMessage === 'string' ? node.testMessage : 'Ready',
+            typeof node.label === 'string' ? node.label : ''
           );
         });
       }
@@ -750,6 +828,14 @@ inline const char* getWebPageHtml() {
 
       side.stopButton.addEventListener('click', function() {
         setHeadRotationAxis(side, 0);
+        controlStateDirty = true;
+        if (statusSynced) {
+          sendControlState();
+        }
+      });
+
+      side.lightSwitch.addEventListener('change', function() {
+        side.lightOn = !!side.lightSwitch.checked;
         controlStateDirty = true;
         if (statusSynced) {
           sendControlState();
@@ -811,6 +897,8 @@ inline const char* getWebPageHtml() {
       setJoystickValues(sides.right, 0, 0, false);
       setHeadRotationAxis(sides.left, 0);
       setHeadRotationAxis(sides.right, 0);
+      sides.left.lightOn = false;
+      sides.right.lightOn = false;
       syncSideReadout(sides.left);
       syncSideReadout(sides.right);
       updateSyncUi();

@@ -33,8 +33,10 @@ TurningHeads 是一个基于 WiFi 协调的 ESP32 项目，用于控制双轴舵
 1. 在 VS Code 中安装 PlatformIO。
 2. 在 VS Code 中打开此项目文件夹。
 3. 在 `platformio.ini` 中选择所需环境：
-   - `coordinator` - 带 Web UI 和舵机控制的协调器固件
-   - `node1` - 节点电机控制固件（NODE_ID=1）
+   - `base_L_as_coordinator` - Base_L 协调器固件（带 Web UI 与舵机控制）
+   - `Satellite_L` - Satellite_L 固件（NODE_ID=1）
+   - `Base_R` - Base_R 固件（NODE_ID=2）
+   - `Satellite_R` - Satellite_R 固件（NODE_ID=3）
    - `servo_id_setter` - 舵机 ID 配置辅助程序
    - `servo_id_reader` - 舵机 ID 读取辅助程序
    - `servo_center_setter` - 舵机中心校准辅助程序
@@ -43,14 +45,14 @@ TurningHeads 是一个基于 WiFi 协调的 ESP32 项目，用于控制双轴舵
 
 ## 协调器使用
 
-1. 使用 `coordinator` 环境刷写 `src/main.cpp`。
+1. 使用 `base_L_as_coordinator` 环境刷写 `src/main.cpp`。
 2. 给开发板供电并连接到 WiFi AP `ESP_TH`，密码为 `TurningHeads123`。
 3. 在浏览器中打开 `http://192.168.4.1/`。
 4. 使用屏幕上的摇杆和电机控制，将舵机移动并将电机指令发送给节点。
 
 ## 节点使用
 
-1. 使用 `node1`、`node2` 或 `node3` 环境刷写 `src/main_node.cpp`。
+1. 使用 `Satellite_L`、`Base_R` 或 `Satellite_R` 环境刷写 `src/main_node.cpp`。
 2. 将节点接线配置为 `GPIO3` 为电机驱动器提供 PWM。
 3. 将节点连接到协调器 WiFi AP。
 4. 节点将尝试连接到 `192.168.4.1:5000`，并从协调器接收电机指令。

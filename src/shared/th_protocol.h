@@ -45,12 +45,25 @@ inline bool tryParseServoCommand(const String& line, int* updownValue, int* late
   return true;
 }
 
+inline bool tryParseLightCommand(const String& line, int* lightState) {
+  if (!line.startsWith("L:")) {
+    return false;
+  }
+
+  *lightState = line.substring(2).toInt();
+  return true;
+}
+
 inline void buildMotorCommand(uint8_t pwmValue, uint8_t dirValue, char* buffer, size_t bufferSize) {
   snprintf(buffer, bufferSize, "M:%u:%u\n", pwmValue, dirValue ? 1 : 0);
 }
 
 inline void buildServoCommand(int16_t updownValue, int16_t lateralValue, char* buffer, size_t bufferSize) {
   snprintf(buffer, bufferSize, "S:%d:%d\n", updownValue, lateralValue);
+}
+
+inline void buildLightCommand(bool lightOn, char* buffer, size_t bufferSize) {
+  snprintf(buffer, bufferSize, "L:%u\n", lightOn ? 1 : 0);
 }
 
 }  // namespace th
