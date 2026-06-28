@@ -1,6 +1,22 @@
 #include <Arduino.h>
 #include <WiFi.h>
 
+#ifndef TH_NODE_ENABLE_DC_MOTOR
+#define TH_NODE_ENABLE_DC_MOTOR 0
+#endif
+
+#ifndef TH_NODE_ENABLE_EYEBALL_SERVOS
+#define TH_NODE_ENABLE_EYEBALL_SERVOS 0
+#endif
+
+#ifndef TH_NODE_ENABLE_SAT_RELAYS
+#define TH_NODE_ENABLE_SAT_RELAYS 0
+#endif
+
+#ifndef TH_NODE_ENABLE_AS5600
+#define TH_NODE_ENABLE_AS5600 0
+#endif
+
 #ifndef NODE_ID
 #define NODE_ID 1
 #endif
@@ -10,57 +26,82 @@
 #include "shared/th_protocol.h"
 #include "node/th_wifi_station.h"
 
+#if TH_NODE_ENABLE_DC_MOTOR
+#include "node/th_motor_driver.h"
+#endif
+
+#if TH_NODE_ENABLE_SAT_RELAYS
+#include "node/th_satellite_relays.h"
+#endif
+
+#if TH_NODE_ENABLE_AS5600
+#include "node/th_base_angle_sensor.h"
+#endif
+
 // ============ KONFIGURATION ============
 const char* WIFI_SSID = "ESP_TH";            // Muss gleich wie Coordinator sein
 const char* WIFI_PASS = "TurningHeads123";   // Muss gleich wie Coordinator sein
 const char* COORDINATOR_IP = "192.168.4.1";  // Standard IP des Coordinators
 const uint16_t COORDINATOR_PORT = 5000 + NODE_ID;  // Je Node ein eigener Port
+
+#if TH_NODE_ENABLE_DC_MOTOR
 const uint16_t PWM_PIN = 3;                  // PWM fuer Motor an GPIO3
+#endif
+
+#if TH_NODE_ENABLE_SAT_RELAYS
 const uint16_t RELAY_LIGHT_PIN = 5;          // Relay control pin for satellite light output
 const uint16_t RELAY_FOG_PIN = 4;            // Relay control pin for satellite fog output
 const bool RELAY_ACTIVE_HIGH = true;
+#endif
+
+#if TH_NODE_ENABLE_AS5600
+const uint8_t AS5600_I2C_ADDR = 0x36;
+const uint8_t AS5600_RAW_ANGLE_REG = 0x0C;
+const uint8_t AS5600_SDA_PIN = 8;
+const uint8_t AS5600_SCL_PIN = 9;
+const uint32_t AS5600_POLL_INTERVAL_MS = 20;
+#endif
 
 // ============ GLOBALE VARIABLEN ============
 WiFiClient tcpClient;
-uint8_t currentMotorValue = 0;
-uint8_t currentMotorDir = 0;
+
+#if TH_NODE_ENABLE_DC_MOTOR
+th::NodeMotorDriver motorDriver(PWM_PIN);
+#endif
+
 int16_t currentServoUpdown = 0;
 int16_t currentServoLateral = 0;
-bool currentLightOn = false;
-bool currentLightBreakerActive = false;
-bool currentFogOn = false;
+
+#if TH_NODE_ENABLE_SAT_RELAYS
+th::SatelliteRelays satelliteRelays(RELAY_LIGHT_PIN, RELAY_FOG_PIN, RELAY_ACTIVE_HIGH);
+#endif
+
 bool nodeReadySent = false;
 uint32_t lastHeartbeatSentMs = 0;
 const uint32_t HEARTBEAT_INTERVAL_MS = 1000;
 th::InputMode currentInputMode = th::InputMode::Manual;
 th::DeviceProfile thisNodeProfile = th::getCurrentNodeProfile();
 
-void applyDcMotor(uint8_t pwmValue, uint8_t dirValue) {
-  currentMotorValue = pwmValue;
-  currentMotorDir = dirValue ? 1 : 0;
-  analogWrite(PWM_PIN, currentMotorValue);
-}
+#if TH_NODE_ENABLE_AS5600
+th::BaseAngleSensor baseAngleSensor(
+  AS5600_I2C_ADDR,
+  AS5600_RAW_ANGLE_REG,
+  AS5600_SDA_PIN,
+  AS5600_SCL_PIN,
+  AS5600_POLL_INTERVAL_MS);
+#endif
 
-void applyLightRelay(bool lightOn) {
-  currentLightOn = lightOn;
-  bool effectiveLightOn = currentLightOn && !currentLightBreakerActive;
-  int relayLevel = (RELAY_ACTIVE_HIGH ? HIGH : LOW);
-  int relayOffLevel = (RELAY_ACTIVE_HIGH ? LOW : HIGH);
-  digitalWrite(RELAY_LIGHT_PIN, effectiveLightOn ? relayLevel : relayOffLevel);
-}
+#if TH_NODE_ENABLE_AS5600
+void sendBaseAngleReport(uint16_t rawAngle, int16_t deg10Angle) {
+  if (!tcpClient.connected()) {
+    return;
+  }
 
-void applyLightBreaker(bool breakerActive) {
-  currentLightBreakerActive = breakerActive;
-  // Re-apply light output with breaker override.
-  applyLightRelay(currentLightOn);
+  char tcpMsg[24];
+  th::buildAngleReportCommand(rawAngle, deg10Angle, tcpMsg, sizeof(tcpMsg));
+  tcpClient.print(tcpMsg);
 }
-
-void applyFogRelay(bool fogOn) {
-  currentFogOn = fogOn;
-  int relayLevel = (RELAY_ACTIVE_HIGH ? HIGH : LOW);
-  int relayOffLevel = (RELAY_ACTIVE_HIGH ? LOW : HIGH);
-  digitalWrite(RELAY_FOG_PIN, currentFogOn ? relayLevel : relayOffLevel);
-}
+#endif
 
 // ============ SETUP ============
 void setup() {
@@ -68,23 +109,39 @@ void setup() {
   delay(500);
   Serial.printf("\n\n=== TurningHeads Node %d (%s) ===\n", NODE_ID, thisNodeProfile.label);
 
+#if TH_NODE_ENABLE_DC_MOTOR
   if (thisNodeProfile.capabilities.hasDcMotor) {
-    pinMode(PWM_PIN, OUTPUT);
-    applyDcMotor(0, 0);
+    motorDriver.begin();
     Serial.printf("[PWM] Initialized on GPIO%d\n", PWM_PIN);
   } else {
-    Serial.println("[PWM] Skipped (no DC motor capability)");
+    Serial.println("[PWM] Compiled, but role has no DC motor capability");
   }
+#else
+  Serial.println("[PWM] Module not compiled for this node env");
+#endif
 
+#if TH_NODE_ENABLE_AS5600
+  if (thisNodeProfile.capabilities.hasDcMotor) {
+    baseAngleSensor.begin();
+    Serial.printf("[AS5600] I2C initialized on SDA=%u SCL=%u\n", AS5600_SDA_PIN, AS5600_SCL_PIN);
+  } else {
+    Serial.println("[AS5600] Compiled, but role has no DC motor capability");
+  }
+#else
+  Serial.println("[AS5600] Module not compiled for this node env");
+#endif
+
+#if TH_NODE_ENABLE_SAT_RELAYS
   if (th::isSatelliteRole(thisNodeProfile.role)) {
-    pinMode(RELAY_LIGHT_PIN, OUTPUT);
-    pinMode(RELAY_FOG_PIN, OUTPUT);
-    applyLightRelay(false);
-    applyLightBreaker(false);
-    applyFogRelay(false);
+    satelliteRelays.begin();
     Serial.printf("[LIGHT] Relay output initialized on GPIO%d\n", RELAY_LIGHT_PIN);
     Serial.printf("[FOG] Relay output initialized on GPIO%d\n", RELAY_FOG_PIN);
+  } else {
+    Serial.println("[RELAY] Compiled, but role is not satellite");
   }
+#else
+  Serial.println("[RELAY] Module not compiled for this node env");
+#endif
 
   // Verbindung zum Coordinator-WLAN
   th::connectStationWifi(WIFI_SSID, WIFI_PASS, 20);
@@ -100,6 +157,7 @@ void loop() {
                   COORDINATOR_IP, COORDINATOR_PORT);
 
     if (tcpClient.connect(COORDINATOR_IP, COORDINATOR_PORT)) {
+      tcpClient.setNoDelay(true);
       Serial.println("[TCP] Connected to Coordinator!");
       nodeReadySent = false;
     } else {
@@ -119,6 +177,16 @@ void loop() {
     tcpClient.printf("HEARTBEAT %d\n", NODE_ID);
     lastHeartbeatSentMs = millis();
   }
+
+#if TH_NODE_ENABLE_AS5600
+  if (th::isBaseRole(thisNodeProfile.role) && thisNodeProfile.capabilities.hasDcMotor) {
+    uint16_t rawAngle = 0;
+    int16_t deg10Angle = 0;
+    if (baseAngleSensor.pollChanged(&rawAngle, &deg10Angle)) {
+      sendBaseAngleReport(rawAngle, deg10Angle);
+    }
+  }
+#endif
 
   // Daten vom Coordinator empfangen und verarbeiten
   while (tcpClient.available()) {
@@ -146,13 +214,14 @@ void loop() {
         continue;
       }
 
+#if TH_NODE_ENABLE_DC_MOTOR
       int motorValue = -1;
-      int motorDir = currentMotorDir;
+      int motorDir = motorDriver.dir();
       if (th::tryParseMotorCommand(line, &motorValue, &motorDir)) {
         if (motorValue >= 0 && motorValue <= 255 && motorDir >= 0 && motorDir <= 1) {
           if (th::isBaseRole(thisNodeProfile.role) && thisNodeProfile.capabilities.hasDcMotor) {
-            applyDcMotor(static_cast<uint8_t>(motorValue), static_cast<uint8_t>(motorDir));
-            Serial.printf("[MOTOR %s] Set pwm=%d dir=%d\n", th::toString(thisNodeProfile.side), currentMotorValue, currentMotorDir);
+            motorDriver.apply(static_cast<uint8_t>(motorValue), static_cast<uint8_t>(motorDir));
+            Serial.printf("[MOTOR %s] Set pwm=%d dir=%d\n", th::toString(thisNodeProfile.side), motorDriver.pwm(), motorDriver.dir());
           } else {
             Serial.printf("[MOTOR] Ignored (node role %s)\n", th::toString(thisNodeProfile.role));
           }
@@ -161,7 +230,9 @@ void loop() {
         }
         continue;
       }
+#endif
 
+#if TH_NODE_ENABLE_EYEBALL_SERVOS
       int servoUpdown = 0;
       int servoLateral = 0;
       if (th::tryParseServoCommand(line, &servoUpdown, &servoLateral)) {
@@ -177,17 +248,19 @@ void loop() {
         }
         continue;
       }
+#endif
 
+#if TH_NODE_ENABLE_SAT_RELAYS
       int lightState = -1;
       if (th::tryParseLightCommand(line, &lightState)) {
         if (th::isSatelliteRole(thisNodeProfile.role)) {
           bool requestedLightOn = (lightState != 0);
-          if (requestedLightOn != currentLightOn) {
-            applyLightRelay(requestedLightOn);
+          if (requestedLightOn != satelliteRelays.lightOn()) {
+            satelliteRelays.applyLight(requestedLightOn);
             Serial.printf("[LIGHT %s] %s%s\n",
                           th::toString(thisNodeProfile.side),
-                          currentLightOn ? "ON" : "OFF",
-                          currentLightBreakerActive ? " (breaker active)" : "");
+                          satelliteRelays.lightOn() ? "ON" : "OFF",
+                          satelliteRelays.lightBreakerActive() ? " (breaker active)" : "");
           }
         } else {
           Serial.printf("[LIGHT] Ignored (node role %s)\n", th::toString(thisNodeProfile.role));
@@ -199,11 +272,11 @@ void loop() {
       if (th::tryParseLightBreakerCommand(line, &lightBreakerState)) {
         if (th::isSatelliteRole(thisNodeProfile.role)) {
           bool requestedBreakerActive = (lightBreakerState != 0);
-          if (requestedBreakerActive != currentLightBreakerActive) {
-            applyLightBreaker(requestedBreakerActive);
+          if (requestedBreakerActive != satelliteRelays.lightBreakerActive()) {
+            satelliteRelays.applyLightBreaker(requestedBreakerActive);
             Serial.printf("[LIGHT BREAKER %s] %s\n",
                           th::toString(thisNodeProfile.side),
-                          currentLightBreakerActive ? "ACTIVE" : "RELEASED");
+                          satelliteRelays.lightBreakerActive() ? "ACTIVE" : "RELEASED");
           }
         } else {
           Serial.printf("[LIGHT BREAKER] Ignored (node role %s)\n", th::toString(thisNodeProfile.role));
@@ -215,20 +288,21 @@ void loop() {
       if (th::tryParseFogCommand(line, &fogState)) {
         if (th::isSatelliteRole(thisNodeProfile.role)) {
           bool requestedFogOn = (fogState != 0);
-          if (requestedFogOn != currentFogOn) {
-            applyFogRelay(requestedFogOn);
-            Serial.printf("[FOG %s] %s\n", th::toString(thisNodeProfile.side), currentFogOn ? "ON" : "OFF");
+          if (requestedFogOn != satelliteRelays.fogOn()) {
+            satelliteRelays.applyFog(requestedFogOn);
+            Serial.printf("[FOG %s] %s\n", th::toString(thisNodeProfile.side), satelliteRelays.fogOn() ? "ON" : "OFF");
           }
         } else {
           Serial.printf("[FOG] Ignored (node role %s)\n", th::toString(thisNodeProfile.role));
         }
         continue;
       }
+#endif
 
     }
   }
 
-  delay(10);
+  delay(2);
 
   if (!tcpClient.connected()) {
     Serial.println("[TCP] Connection lost, will reconnect...");

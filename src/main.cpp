@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Wire.h>
 #include <ESPAsyncWebServer.h>
 #include <SCServo.h>
 #include "shared/th_roles.h"
@@ -24,6 +25,11 @@ const uint8_t SERVO_LATERAL_ID = 2;
 const uint16_t SERVO_POS_MIN = 0;
 const uint16_t SERVO_POS_MAX = 1023;
 const uint16_t SERVO_POS_CENTER = 511;
+const uint8_t AS5600_I2C_ADDR = 0x36;
+const uint8_t AS5600_RAW_ANGLE_REG = 0x0C;
+const uint8_t AS5600_SDA_PIN = 8;
+const uint8_t AS5600_SCL_PIN = 9;
+const uint32_t AS5600_POLL_INTERVAL_MS = 20;
 int16_t updown_pos_limit = 140;
 int16_t lateral_pos_limit = 80;
 const uint16_t SERVO_SPEED = 4095;  // Explicit max speed (stable setting)
@@ -68,6 +74,11 @@ SCSCL scServo;
 volatile int16_t desiredServoUpdownValue = 0;
 volatile int16_t desiredServoLateralValue = 0;
 portMUX_TYPE servoMux = portMUX_INITIALIZER_UNLOCKED;
+int leftBaseAngleRaw = -1;
+int rightBaseAngleRaw = -1;
+int leftBaseAngleDeg10 = -1;
+int rightBaseAngleDeg10 = -1;
+uint32_t lastAs5600PollMs = 0;
 
 enum NodeTestState {
   NODE_TEST_IDLE,
@@ -94,6 +105,10 @@ NodeSlot nodeSlots[NODE_COUNT] = {
   {2, th::getRemoteNodeProfile(2), &tcpServer2, &tcpClient2, false, NODE_TEST_IDLE, false, 0, 0, "Ready"},
   {3, th::getRemoteNodeProfile(3), &tcpServer3, &tcpClient3, false, NODE_TEST_IDLE, false, 0, 0, "Ready"}
 };
+NodeTestState hostTestState = NODE_TEST_IDLE;
+char hostTestMessage[32] = "Ready";
+
+void broadcastStatus();
 
 const uint32_t NODE_HEARTBEAT_TIMEOUT_MS = 4000;
 const uint32_t NODE_TEST_TIMEOUT_MS = 2500;
@@ -130,6 +145,8 @@ void markNodeSeen(NodeSlot &node) {
 
 uint8_t countConnectedNodes() {
   uint8_t count = 0;
+  // Host node (Coordinator/Base_L) is local and always reachable while UI is connected.
+  ++count;
   for (uint8_t index = 0; index < NODE_COUNT; ++index) {
     if (nodeSlots[index].connected) {
       ++count;
@@ -148,6 +165,71 @@ const SideControlState& getSideStateConst(th::Side side) {
 
 th::Side oppositeSide(th::Side side) {
   return side == th::Side::Right ? th::Side::Left : th::Side::Right;
+}
+
+int16_t rawAngleToDeg10(uint16_t rawAngle) {
+  uint32_t scaled = ((uint32_t)rawAngle * 3600UL + 2048UL) / 4096UL;
+  if (scaled >= 3600UL) {
+    scaled = 0;
+  }
+  return static_cast<int16_t>(scaled);
+}
+
+bool readAs5600RawAngle(uint16_t* outRawAngle) {
+  Wire.beginTransmission(AS5600_I2C_ADDR);
+  Wire.write(AS5600_RAW_ANGLE_REG);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  uint8_t bytes = Wire.requestFrom((int)AS5600_I2C_ADDR, 2);
+  if (bytes != 2) {
+    return false;
+  }
+
+  uint8_t highByte = Wire.read();
+  uint8_t lowByte = Wire.read();
+  *outRawAngle = static_cast<uint16_t>(((highByte & 0x0F) << 8) | lowByte);
+  return true;
+}
+
+void pollLocalBaseAs5600() {
+  if ((millis() - lastAs5600PollMs) < AS5600_POLL_INTERVAL_MS) {
+    return;
+  }
+  lastAs5600PollMs = millis();
+
+  uint16_t rawAngle = 0;
+  if (!readAs5600RawAngle(&rawAngle)) {
+    if (leftBaseAngleRaw != -1 || leftBaseAngleDeg10 != -1) {
+      leftBaseAngleRaw = -1;
+      leftBaseAngleDeg10 = -1;
+      broadcastStatus();
+    }
+    return;
+  }
+
+  int16_t deg10Angle = rawAngleToDeg10(rawAngle);
+  if ((int)rawAngle != leftBaseAngleRaw || (int)deg10Angle != leftBaseAngleDeg10) {
+    leftBaseAngleRaw = (int)rawAngle;
+    leftBaseAngleDeg10 = (int)deg10Angle;
+    broadcastStatus();
+  }
+}
+
+void setHostTestState(NodeTestState state, const char* message) {
+  hostTestState = state;
+  strncpy(hostTestMessage, message, sizeof(hostTestMessage) - 1);
+  hostTestMessage[sizeof(hostTestMessage) - 1] = '\0';
+}
+
+void runHostDeviceTest() {
+  setHostTestState(NODE_TEST_SENDING, "Testing host endpoint");
+  broadcastStatus();
+
+  // Local host test intentionally verifies only endpoint responsiveness, not peripherals.
+  setHostTestState(NODE_TEST_OK, "Host endpoint OK");
+  broadcastStatus();
 }
 
 uint8_t mirroredMotorDir(uint8_t dirValue) {
@@ -186,6 +268,14 @@ String buildStatusMessage() {
   statusMsg += right.motorPwm;
   statusMsg += ",\"rightMotorDir\":";
   statusMsg += right.motorDir;
+  statusMsg += ",\"leftBaseAngleRaw\":";
+  statusMsg += leftBaseAngleRaw;
+  statusMsg += ",\"rightBaseAngleRaw\":";
+  statusMsg += rightBaseAngleRaw;
+  statusMsg += ",\"leftBaseAngleDeg10\":";
+  statusMsg += leftBaseAngleDeg10;
+  statusMsg += ",\"rightBaseAngleDeg10\":";
+  statusMsg += rightBaseAngleDeg10;
   statusMsg += ",\"leftLight\":";
   statusMsg += left.lightOn ? "true" : "false";
   statusMsg += ",\"rightLight\":";
@@ -222,10 +312,26 @@ String buildStatusMessage() {
   statusMsg += ",\"connectedNodes\":";
   statusMsg += countConnectedNodes();
   statusMsg += ",\"nodeCount\":";
-  statusMsg += NODE_COUNT;
+  statusMsg += (NODE_COUNT + 1);
   statusMsg += ",\"nodeConnected\":";
   statusMsg += (countConnectedNodes() > 0) ? "true" : "false";
   statusMsg += ",\"nodes\":[";
+
+  bool hostConnected = true;
+  statusMsg += "{";
+  statusMsg += "\"id\":0";
+  statusMsg += ",\"role\":\"";
+  statusMsg += th::toString(th::NodeRole::Coordinator);
+  statusMsg += "\",\"label\":\"Base_L (Host)\"";
+  statusMsg += ",\"connected\":";
+  statusMsg += hostConnected ? "true" : "false";
+  statusMsg += ",\"lastSeenMs\":";
+  statusMsg += millis();
+  statusMsg += ",\"testState\":\"";
+  statusMsg += nodeTestStateToString(hostTestState);
+  statusMsg += "\",\"testMessage\":\"";
+  statusMsg += hostTestMessage;
+  statusMsg += "\"},";
 
   for (uint8_t index = 0; index < NODE_COUNT; ++index) {
     NodeSlot &node = nodeSlots[index];
@@ -354,6 +460,10 @@ void updateNodeConnection(NodeSlot &node, bool connected, const char* message) {
     node.client->stop();
     node.testPending = false;
     setNodeTestState(node, NODE_TEST_ERROR, message);
+    if (th::isBaseRole(node.profile.role) && node.profile.side == th::Side::Right) {
+      rightBaseAngleRaw = -1;
+      rightBaseAngleDeg10 = -1;
+    }
   } else {
     setNodeTestState(node, NODE_TEST_IDLE, message);
   }
@@ -365,6 +475,7 @@ void serviceNodeSlot(NodeSlot &node) {
     WiFiClient newClient = node.server->available();
     if (newClient) {
       *node.client = newClient;
+      node.client->setNoDelay(true);
       updateNodeConnection(node, true, "Node ready");
       Serial.printf("[TCP] Node %u connected on port %u\n", node.id, (unsigned)(NODE_PORT_BASE + node.id));
     }
@@ -400,6 +511,22 @@ void serviceNodeSlot(NodeSlot &node) {
         updateNodeConnection(node, true, "Node ready");
       } else {
         broadcastStatus();
+      }
+      continue;
+    }
+
+    int angleRaw = -1;
+    int angleDeg10 = -1;
+    if (th::tryParseAngleReportCommand(line, &angleRaw, &angleDeg10)) {
+      markNodeSeen(node);
+      if (th::isBaseRole(node.profile.role) && node.profile.side == th::Side::Right) {
+        int clampedRaw = constrain(angleRaw, 0, 4095);
+        int clampedDeg10 = constrain(angleDeg10, 0, 3599);
+        if (rightBaseAngleRaw != clampedRaw || rightBaseAngleDeg10 != clampedDeg10) {
+          rightBaseAngleRaw = clampedRaw;
+          rightBaseAngleDeg10 = clampedDeg10;
+          broadcastStatus();
+        }
       }
       continue;
     }
@@ -542,7 +669,11 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 
       if (strstr(buffer, "\"nodeTest\"") != NULL) {
         int nodeId = -1;
-        if (th::parseJsonIntInRange(buffer, "nodeId", 1, NODE_COUNT, &nodeId)) {
+        if (th::parseJsonIntInRange(buffer, "nodeId", 0, NODE_COUNT, &nodeId)) {
+          if (nodeId == 0) {
+            runHostDeviceTest();
+            return;
+          }
           NodeSlot* node = getNodeSlotById((uint8_t)nodeId);
           if (node != nullptr) {
             sendNodeTestSignal(*node);
@@ -959,6 +1090,9 @@ void setup() {
   applyDcMotorDriver(0, 0);
   Serial.printf("[MOTOR] PWM GPIO%d, DIR GPIO%d\n", MOTOR_PWM_PIN, MOTOR_DIR_PIN);
 
+  Wire.begin(AS5600_SDA_PIN, AS5600_SCL_PIN);
+  Serial.printf("[AS5600] I2C initialized on SDA=%u SCL=%u\n", AS5600_SDA_PIN, AS5600_SCL_PIN);
+
   // UART-Servo (SC09) initialisieren: TX=GPIO21, RX=GPIO20
   Serial1.begin(SERVO_BAUD, SERIAL_8N1, SERVO_UART_RX_PIN, SERVO_UART_TX_PIN);
   scServo.pSerial = &Serial1;
@@ -997,11 +1131,13 @@ void setup() {
 
 // ============ LOOP ============
 void loop() {
+  pollLocalBaseAs5600();
+
   for (uint8_t index = 0; index < NODE_COUNT; ++index) {
     serviceNodeSlot(nodeSlots[index]);
     checkNodeHealth(nodeSlots[index]);
   }
 
-  delay(10);
+  delay(2);
 }
 

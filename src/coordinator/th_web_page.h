@@ -158,6 +158,87 @@ inline const char* getWebPageHtml() {
       font-size: 11px;
       text-align: center;
     }
+    .angle-panel {
+      margin-top: 8px;
+      display: grid;
+      grid-template-columns: 56px 90px;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      background: #1d1d1d;
+      border: 1px solid #3f3f3f;
+      border-radius: 8px;
+      padding: 7px;
+    }
+    .angle-gauge {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      border: 2px solid #5d5d5d;
+      position: relative;
+      background: radial-gradient(circle at center, #2f2f2f 0%, #202020 70%, #1a1a1a 100%);
+      box-shadow: inset 0 0 12px rgba(0, 0, 0, 0.5);
+    }
+    .angle-needle {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 2px;
+      height: 23px;
+      margin-left: -1px;
+      margin-top: -23px;
+      border-radius: 999px;
+      background: #ff5f45;
+      transform-origin: 50% 100%;
+      transform: rotate(0deg);
+      box-shadow: 0 0 8px rgba(255, 95, 69, 0.8);
+      transition: transform 80ms linear;
+    }
+    .angle-center-dot {
+      position: absolute;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      left: 50%;
+      top: 50%;
+      margin-left: -4px;
+      margin-top: -4px;
+      background: #d7d7d7;
+      border: 1px solid #3a3a3a;
+    }
+    .angle-text {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      line-height: 1.15;
+      min-width: 72px;
+    }
+    .angle-text .label {
+      font-size: 10px;
+      color: #a9a9a9;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+    .angle-text .value {
+      font-family: "Consolas", "Courier New", monospace;
+      font-size: 18px;
+      color: #f0fff0;
+      font-variant-numeric: tabular-nums;
+      width: 100%;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .angle-number {
+      display: inline-block;
+      width: 5ch;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .angle-unit {
+      display: inline-block;
+      width: 2ch;
+      text-align: left;
+    }
     .motor-row {
       margin-top: 6px;
       display: grid;
@@ -373,6 +454,16 @@ inline const char* getWebPageHtml() {
             <div id="leftJoystickThumb" class="joystick-thumb"></div>
           </div>
           <div class="mini-label">Left eyeball axis</div>
+          <div class="angle-panel">
+            <div class="angle-gauge" aria-label="Left base angle">
+              <div id="leftBaseAngleNeedle" class="angle-needle"></div>
+              <div class="angle-center-dot"></div>
+            </div>
+            <div class="angle-text">
+              <div class="label">Base Angle</div>
+              <div class="value"><span id="leftBaseAngleValue" class="angle-number">--.-</span><span class="angle-unit">deg</span></div>
+            </div>
+          </div>
         </div>
         <div class="motor-row">
           <label for="leftMotorSlider">Head Rotation</label>
@@ -448,6 +539,16 @@ inline const char* getWebPageHtml() {
             <div id="rightJoystickThumb" class="joystick-thumb"></div>
           </div>
           <div class="mini-label">Right eyeball axis</div>
+          <div class="angle-panel">
+            <div class="angle-gauge" aria-label="Right base angle">
+              <div id="rightBaseAngleNeedle" class="angle-needle"></div>
+              <div class="angle-center-dot"></div>
+            </div>
+            <div class="angle-text">
+              <div class="label">Base Angle</div>
+              <div class="value"><span id="rightBaseAngleValue" class="angle-number">--.-</span><span class="angle-unit">deg</span></div>
+            </div>
+          </div>
         </div>
         <div class="motor-row">
           <label for="rightMotorSlider">Head Rotation</label>
@@ -474,6 +575,15 @@ inline const char* getWebPageHtml() {
     </div>
 
     <div class="node-grid">
+      <div class="node-card">
+        <div id="node0Header" class="node-card-header">Base_L (Host)</div>
+        <div class="node-card-status">
+          <span id="node0Light" class="signal-light signal-idle"></span>
+          <span id="node0Connection">Disconnected</span>
+        </div>
+        <button id="node0TestButton" class="btn" type="button">Send Test Signal</button>
+        <div id="node0Message" class="node-card-message">Ready</div>
+      </div>
       <div class="node-card">
         <div id="node1Header" class="node-card-header">Satellite_L</div>
         <div class="node-card-status">
@@ -555,6 +665,10 @@ inline const char* getWebPageHtml() {
         lightSwitch: document.getElementById('leftLightSwitch'),
         lightBreakerButton: document.getElementById('leftLightBreakerButton'),
         fogButton: document.getElementById('leftFogButton'),
+        baseAngleDeg10: -1,
+        baseAngleVisualDeg: null,
+        angleNeedle: document.getElementById('leftBaseAngleNeedle'),
+        angleValue: document.getElementById('leftBaseAngleValue'),
         dragging: false
       },
       right: {
@@ -576,10 +690,14 @@ inline const char* getWebPageHtml() {
         lightSwitch: document.getElementById('rightLightSwitch'),
         lightBreakerButton: document.getElementById('rightLightBreakerButton'),
         fogButton: document.getElementById('rightFogButton'),
+        baseAngleDeg10: -1,
+        baseAngleVisualDeg: null,
+        angleNeedle: document.getElementById('rightBaseAngleNeedle'),
+        angleValue: document.getElementById('rightBaseAngleValue'),
         dragging: false
       }
     };
-    const nodeUi = [1, 2, 3].map(function(nodeId) {
+    const nodeUi = [0, 1, 2, 3].map(function(nodeId) {
       return {
         id: nodeId,
         header: document.getElementById('node' + nodeId + 'Header'),
@@ -609,6 +727,39 @@ inline const char* getWebPageHtml() {
       side.lightSwitch.checked = !!side.lightOn;
       side.lightBreakerButton.classList.toggle('active', !!side.lightBreakerActive);
       side.fogButton.classList.toggle('active', !!side.fogOn);
+      renderBaseAngle(side);
+    }
+
+    function renderBaseAngle(side) {
+      const hasAngle = typeof side.baseAngleDeg10 === 'number' && side.baseAngleDeg10 >= 0;
+      if (!hasAngle) {
+        side.angleValue.textContent = '--.-';
+        side.baseAngleVisualDeg = null;
+        side.angleNeedle.style.transform = 'rotate(0deg)';
+        side.angleNeedle.style.opacity = '0.35';
+        return;
+      }
+
+      const normalized = ((side.baseAngleDeg10 % 3600) + 3600) % 3600;
+      const degrees = normalized / 10;
+      side.angleValue.textContent = degrees.toFixed(1);
+
+      if (typeof side.baseAngleVisualDeg !== 'number') {
+        side.baseAngleVisualDeg = degrees;
+      } else {
+        let delta = degrees - side.baseAngleVisualDeg;
+        while (delta > 180) {
+          delta -= 360;
+        }
+        while (delta < -180) {
+          delta += 360;
+        }
+        side.baseAngleVisualDeg += delta;
+      }
+
+      const visualDegrees = side.baseAngleVisualDeg + 180;
+      side.angleNeedle.style.transform = 'rotate(' + visualDegrees.toFixed(1) + 'deg)';
+      side.angleNeedle.style.opacity = '1';
     }
 
     function updateRotationSliderVisual(side) {
@@ -791,7 +942,7 @@ inline const char* getWebPageHtml() {
 
     ws.onmessage = function(event) {
       const data = JSON.parse(event.data);
-      const nodeCount = typeof data.nodeCount === 'number' ? data.nodeCount : 3;
+      const nodeCount = typeof data.nodeCount === 'number' ? data.nodeCount : 4;
       const connectedNodes = typeof data.connectedNodes === 'number'
         ? data.connectedNodes
         : (Array.isArray(data.nodes) ? data.nodes.filter(function(node) { return !!node.connected; }).length : 0);
@@ -862,6 +1013,14 @@ inline const char* getWebPageHtml() {
       if (typeof data.rightFog === 'boolean') {
         sides.right.fogOn = data.rightFog;
         syncSideReadout(sides.right);
+      }
+      if (typeof data.leftBaseAngleDeg10 === 'number') {
+        sides.left.baseAngleDeg10 = data.leftBaseAngleDeg10;
+        renderBaseAngle(sides.left);
+      }
+      if (typeof data.rightBaseAngleDeg10 === 'number') {
+        sides.right.baseAngleDeg10 = data.rightBaseAngleDeg10;
+        renderBaseAngle(sides.right);
       }
 
       if (typeof data.motorLink === 'boolean') {

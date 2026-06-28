@@ -72,6 +72,23 @@ inline bool tryParseFogCommand(const String& line, int* fogState) {
   return true;
 }
 
+inline bool tryParseAngleReportCommand(const String& line, int* rawValue, int* deg10Value) {
+  if (!line.startsWith("ANG:")) {
+    return false;
+  }
+
+  int firstSep = line.indexOf(':', 4);
+  if (firstSep < 0) {
+    return false;
+  }
+
+  String rawToken = line.substring(4, firstSep);
+  String deg10Token = line.substring(firstSep + 1);
+  *rawValue = rawToken.toInt();
+  *deg10Value = deg10Token.toInt();
+  return true;
+}
+
 inline void buildMotorCommand(uint8_t pwmValue, uint8_t dirValue, char* buffer, size_t bufferSize) {
   snprintf(buffer, bufferSize, "M:%u:%u\n", pwmValue, dirValue ? 1 : 0);
 }
@@ -90,6 +107,10 @@ inline void buildLightBreakerCommand(bool breakerActive, char* buffer, size_t bu
 
 inline void buildFogCommand(bool fogOn, char* buffer, size_t bufferSize) {
   snprintf(buffer, bufferSize, "F:%u\n", fogOn ? 1 : 0);
+}
+
+inline void buildAngleReportCommand(uint16_t rawValue, int16_t deg10Value, char* buffer, size_t bufferSize) {
+  snprintf(buffer, bufferSize, "ANG:%u:%d\n", rawValue, deg10Value);
 }
 
 }  // namespace th
