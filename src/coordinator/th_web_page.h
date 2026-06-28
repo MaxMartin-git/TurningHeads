@@ -11,6 +11,12 @@ inline const char* getWebPageHtml() {
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <style>
     html, body { height: 100%; }
+    * {
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
     body {
       font-family: "Segoe UI", sans-serif;
       margin: 0;
@@ -223,6 +229,22 @@ inline const char* getWebPageHtml() {
       font-size: 11px;
       color: #d7d7d7;
     }
+    .momentary-btn {
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-weight: bold;
+      font-size: 11px;
+      background: #4b4b4b;
+      color: #f2f2f2;
+      min-width: 68px;
+    }
+    .momentary-btn.active {
+      background: #59cb5e;
+      border-color: #8be98d;
+      color: #102010;
+      box-shadow: 0 0 12px rgba(89, 203, 94, 0.6);
+    }
     .switch {
       position: relative;
       display: inline-block;
@@ -367,6 +389,11 @@ inline const char* getWebPageHtml() {
             <input type="checkbox" id="leftLightSwitch">
             <span class="switch-slider"></span>
           </label>
+          <button id="leftLightBreakerButton" class="momentary-btn" type="button">Breaker</button>
+        </div>
+        <div class="light-row">
+          <span>Fog</span>
+          <button id="leftFogButton" class="momentary-btn" type="button">Fog</button>
         </div>
       </div>
 
@@ -392,6 +419,20 @@ inline const char* getWebPageHtml() {
           <label class="sync-check" for="motorMirror">
             <input type="checkbox" id="motorMirror" checked>
             <span>Mirror</span>
+          </label>
+        </div>
+        <div class="sync-group">
+          <div class="sync-group-head">Light</div>
+          <label class="sync-check" for="lightLink">
+            <input type="checkbox" id="lightLink" checked>
+            <span>Link L/R</span>
+          </label>
+        </div>
+        <div class="sync-group">
+          <div class="sync-group-head">Fog</div>
+          <label class="sync-check" for="fogLink">
+            <input type="checkbox" id="fogLink" checked>
+            <span>Link L/R</span>
           </label>
         </div>
       </div>
@@ -423,6 +464,11 @@ inline const char* getWebPageHtml() {
             <input type="checkbox" id="rightLightSwitch">
             <span class="switch-slider"></span>
           </label>
+          <button id="rightLightBreakerButton" class="momentary-btn" type="button">Breaker</button>
+        </div>
+        <div class="light-row">
+          <span>Fog</span>
+          <button id="rightFogButton" class="momentary-btn" type="button">Fog</button>
         </div>
       </div>
     </div>
@@ -477,13 +523,17 @@ inline const char* getWebPageHtml() {
       motorLink: true,
       motorMirror: true,
       eyeballLink: true,
-      eyeballMirror: true
+      eyeballMirror: true,
+      lightLink: true,
+      fogLink: true
     };
     const syncUi = {
       motorLink: document.getElementById('motorLink'),
       motorMirror: document.getElementById('motorMirror'),
       eyeballLink: document.getElementById('eyeballLink'),
-      eyeballMirror: document.getElementById('eyeballMirror')
+      eyeballMirror: document.getElementById('eyeballMirror'),
+      lightLink: document.getElementById('lightLink'),
+      fogLink: document.getElementById('fogLink')
     };
     const sides = {
       left: {
@@ -493,6 +543,8 @@ inline const char* getWebPageHtml() {
         motorPwm: 0,
         motorDir: 0,
         lightOn: false,
+        lightBreakerActive: false,
+        fogOn: false,
         pad: document.getElementById('leftJoystickPad'),
         thumb: document.getElementById('leftJoystickThumb'),
         updownText: document.getElementById('leftServoUpdownValue'),
@@ -501,6 +553,8 @@ inline const char* getWebPageHtml() {
         motorValue: document.getElementById('leftMotorValue'),
         stopButton: document.getElementById('leftStopButton'),
         lightSwitch: document.getElementById('leftLightSwitch'),
+        lightBreakerButton: document.getElementById('leftLightBreakerButton'),
+        fogButton: document.getElementById('leftFogButton'),
         dragging: false
       },
       right: {
@@ -510,6 +564,8 @@ inline const char* getWebPageHtml() {
         motorPwm: 0,
         motorDir: 0,
         lightOn: false,
+        lightBreakerActive: false,
+        fogOn: false,
         pad: document.getElementById('rightJoystickPad'),
         thumb: document.getElementById('rightJoystickThumb'),
         updownText: document.getElementById('rightServoUpdownValue'),
@@ -518,6 +574,8 @@ inline const char* getWebPageHtml() {
         motorValue: document.getElementById('rightMotorValue'),
         stopButton: document.getElementById('rightStopButton'),
         lightSwitch: document.getElementById('rightLightSwitch'),
+        lightBreakerButton: document.getElementById('rightLightBreakerButton'),
+        fogButton: document.getElementById('rightFogButton'),
         dragging: false
       }
     };
@@ -549,6 +607,8 @@ inline const char* getWebPageHtml() {
       side.motorSlider.value = side.motorAxis;
       updateRotationSliderVisual(side);
       side.lightSwitch.checked = !!side.lightOn;
+      side.lightBreakerButton.classList.toggle('active', !!side.lightBreakerActive);
+      side.fogButton.classList.toggle('active', !!side.fogOn);
     }
 
     function updateRotationSliderVisual(side) {
@@ -642,10 +702,16 @@ inline const char* getWebPageHtml() {
         rightMotorDir: sides.right.motorDir,
         leftLight: sides.left.lightOn,
         rightLight: sides.right.lightOn,
+        leftLightBreaker: sides.left.lightBreakerActive,
+        rightLightBreaker: sides.right.lightBreakerActive,
+        leftFog: sides.left.fogOn,
+        rightFog: sides.right.fogOn,
         motorLink: syncOptions.motorLink,
         motorMirror: syncOptions.motorMirror,
         eyeballLink: syncOptions.eyeballLink,
-        eyeballMirror: syncOptions.eyeballMirror
+        eyeballMirror: syncOptions.eyeballMirror,
+        lightLink: syncOptions.lightLink,
+        fogLink: syncOptions.fogLink
       };
     }
 
@@ -654,6 +720,8 @@ inline const char* getWebPageHtml() {
       syncUi.motorMirror.checked = !!syncOptions.motorMirror;
       syncUi.eyeballLink.checked = !!syncOptions.eyeballLink;
       syncUi.eyeballMirror.checked = !!syncOptions.eyeballMirror;
+      syncUi.lightLink.checked = !!syncOptions.lightLink;
+      syncUi.fogLink.checked = !!syncOptions.fogLink;
       syncUi.motorMirror.disabled = !syncOptions.motorLink;
       syncUi.eyeballMirror.disabled = !syncOptions.eyeballLink;
     }
@@ -779,6 +847,22 @@ inline const char* getWebPageHtml() {
         sides.right.lightOn = data.rightLight;
         syncSideReadout(sides.right);
       }
+      if (typeof data.leftLightBreaker === 'boolean') {
+        sides.left.lightBreakerActive = data.leftLightBreaker;
+        syncSideReadout(sides.left);
+      }
+      if (typeof data.rightLightBreaker === 'boolean') {
+        sides.right.lightBreakerActive = data.rightLightBreaker;
+        syncSideReadout(sides.right);
+      }
+      if (typeof data.leftFog === 'boolean') {
+        sides.left.fogOn = data.leftFog;
+        syncSideReadout(sides.left);
+      }
+      if (typeof data.rightFog === 'boolean') {
+        sides.right.fogOn = data.rightFog;
+        syncSideReadout(sides.right);
+      }
 
       if (typeof data.motorLink === 'boolean') {
         syncOptions.motorLink = data.motorLink;
@@ -791,6 +875,12 @@ inline const char* getWebPageHtml() {
       }
       if (typeof data.eyeballMirror === 'boolean') {
         syncOptions.eyeballMirror = data.eyeballMirror;
+      }
+      if (typeof data.lightLink === 'boolean') {
+        syncOptions.lightLink = data.lightLink;
+      }
+      if (typeof data.fogLink === 'boolean') {
+        syncOptions.fogLink = data.fogLink;
       }
       enforceSyncDependencies();
       updateSyncUi();
@@ -840,6 +930,51 @@ inline const char* getWebPageHtml() {
         if (statusSynced) {
           sendControlState();
         }
+      });
+
+      function bindMomentaryButton(button, onStateChanged) {
+        let pressed = false;
+
+        function setPressed(nextPressed) {
+          if (pressed === nextPressed) {
+            return;
+          }
+          pressed = nextPressed;
+          onStateChanged(pressed);
+          controlStateDirty = true;
+          if (statusSynced) {
+            sendControlState();
+          }
+        }
+
+        button.addEventListener('pointerdown', function(event) {
+          button.setPointerCapture(event.pointerId);
+          setPressed(true);
+          event.preventDefault();
+        });
+
+        function releaseFromPointer(event) {
+          if (button.hasPointerCapture(event.pointerId)) {
+            button.releasePointerCapture(event.pointerId);
+          }
+          setPressed(false);
+        }
+
+        button.addEventListener('pointerup', releaseFromPointer);
+        button.addEventListener('pointercancel', releaseFromPointer);
+        button.addEventListener('pointerleave', function() {
+          setPressed(false);
+        });
+      }
+
+      bindMomentaryButton(side.lightBreakerButton, function(isPressed) {
+        side.lightBreakerActive = isPressed;
+        syncSideReadout(side);
+      });
+
+      bindMomentaryButton(side.fogButton, function(isPressed) {
+        side.fogOn = isPressed;
+        syncSideReadout(side);
       });
 
       side.pad.addEventListener('pointerdown', function(event) {
@@ -899,6 +1034,10 @@ inline const char* getWebPageHtml() {
       setHeadRotationAxis(sides.right, 0);
       sides.left.lightOn = false;
       sides.right.lightOn = false;
+      sides.left.lightBreakerActive = false;
+      sides.right.lightBreakerActive = false;
+      sides.left.fogOn = false;
+      sides.right.fogOn = false;
       syncSideReadout(sides.left);
       syncSideReadout(sides.right);
       updateSyncUi();
@@ -917,6 +1056,11 @@ inline const char* getWebPageHtml() {
         event.preventDefault();
       }
     }, { passive: false });
+
+    // Disable browser context menus globally (desktop right-click and mobile long-press).
+    document.addEventListener('contextmenu', function(event) {
+      event.preventDefault();
+    });
   </script>
 </body>
 </html>

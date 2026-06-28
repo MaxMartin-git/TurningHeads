@@ -44,17 +44,21 @@ struct SideControlState {
   int16_t servoUpdown;
   int16_t servoLateral;
   bool lightOn;
+  bool lightBreakerActive;
+  bool fogOn;
 };
 
 SideControlState sideState[2] = {
-  {0, 0, 0, 0, false},  // Left side (local base/coordinator)
-  {0, 0, 0, 0, false}   // Right side (remote base/satellite)
+  {0, 0, 0, 0, false, false, false},  // Left side (local base/coordinator)
+  {0, 0, 0, 0, false, false, false}   // Right side (remote base/satellite)
 };
 
 bool motorLinkEnabled = true;
 bool motorMirrorEnabled = true;
 bool eyeballLinkEnabled = true;
 bool eyeballMirrorEnabled = true;
+bool lightLinkEnabled = true;
+bool fogLinkEnabled = true;
 
 th::InputMode currentInputMode = th::InputMode::Manual;
 uint16_t activeSequenceId = 0;
@@ -186,6 +190,14 @@ String buildStatusMessage() {
   statusMsg += left.lightOn ? "true" : "false";
   statusMsg += ",\"rightLight\":";
   statusMsg += right.lightOn ? "true" : "false";
+  statusMsg += ",\"leftLightBreaker\":";
+  statusMsg += left.lightBreakerActive ? "true" : "false";
+  statusMsg += ",\"rightLightBreaker\":";
+  statusMsg += right.lightBreakerActive ? "true" : "false";
+  statusMsg += ",\"leftFog\":";
+  statusMsg += left.fogOn ? "true" : "false";
+  statusMsg += ",\"rightFog\":";
+  statusMsg += right.fogOn ? "true" : "false";
   statusMsg += ",\"motorLink\":";
   statusMsg += motorLinkEnabled ? "true" : "false";
   statusMsg += ",\"motorMirror\":";
@@ -194,6 +206,10 @@ String buildStatusMessage() {
   statusMsg += eyeballLinkEnabled ? "true" : "false";
   statusMsg += ",\"eyeballMirror\":";
   statusMsg += eyeballMirrorEnabled ? "true" : "false";
+  statusMsg += ",\"lightLink\":";
+  statusMsg += lightLinkEnabled ? "true" : "false";
+  statusMsg += ",\"fogLink\":";
+  statusMsg += fogLinkEnabled ? "true" : "false";
   // Backward compatibility fields (left side mirrors legacy names)
   statusMsg += ",\"servoUpdown\":";
   statusMsg += left.servoUpdown;
@@ -275,6 +291,36 @@ void sendServoToRemoteSatelliteNodes(th::Side side, int16_t updownValue, int16_t
 void sendLightToRemoteSatelliteNodes(th::Side side, bool lightOn) {
   char tcpMsg[12];
   th::buildLightCommand(lightOn, tcpMsg, sizeof(tcpMsg));
+
+  for (uint8_t index = 0; index < NODE_COUNT; ++index) {
+    NodeSlot &node = nodeSlots[index];
+    if (!th::isSatelliteRole(node.profile.role) || !node.profile.capabilities.hasEyeballServos || node.profile.side != side) {
+      continue;
+    }
+    if (node.connected && node.client->connected()) {
+      node.client->print(tcpMsg);
+    }
+  }
+}
+
+void sendLightBreakerToRemoteSatelliteNodes(th::Side side, bool breakerActive) {
+  char tcpMsg[12];
+  th::buildLightBreakerCommand(breakerActive, tcpMsg, sizeof(tcpMsg));
+
+  for (uint8_t index = 0; index < NODE_COUNT; ++index) {
+    NodeSlot &node = nodeSlots[index];
+    if (!th::isSatelliteRole(node.profile.role) || !node.profile.capabilities.hasEyeballServos || node.profile.side != side) {
+      continue;
+    }
+    if (node.connected && node.client->connected()) {
+      node.client->print(tcpMsg);
+    }
+  }
+}
+
+void sendFogToRemoteSatelliteNodes(th::Side side, bool fogOn) {
+  char tcpMsg[12];
+  th::buildFogCommand(fogOn, tcpMsg, sizeof(tcpMsg));
 
   for (uint8_t index = 0; index < NODE_COUNT; ++index) {
     NodeSlot &node = nodeSlots[index];
@@ -513,9 +559,16 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
       bool rightMotorChanged = false;
       bool leftLightChanged = false;
       bool rightLightChanged = false;
+      bool leftLightBreakerChanged = false;
+      bool rightLightBreakerChanged = false;
+      bool leftFogChanged = false;
+      bool rightFogChanged = false;
       bool stateChanged = false;
       th::Side servoSourceSide = th::Side::Unknown;
       th::Side motorSourceSide = th::Side::Unknown;
+      th::Side lightSourceSide = th::Side::Unknown;
+      th::Side lightBreakerSourceSide = th::Side::Unknown;
+      th::Side fogSourceSide = th::Side::Unknown;
 
       bool parsedBoolValue = false;
       bool syncOptionChanged = false;
@@ -535,13 +588,43 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         eyeballMirrorEnabled = parsedBoolValue;
         syncOptionChanged = true;
       }
+      if (th::parseJsonBool(buffer, "lightLink", &parsedBoolValue)) {
+        lightLinkEnabled = parsedBoolValue;
+        syncOptionChanged = true;
+      }
+      if (th::parseJsonBool(buffer, "fogLink", &parsedBoolValue)) {
+        fogLinkEnabled = parsedBoolValue;
+        syncOptionChanged = true;
+      }
       if (th::parseJsonBool(buffer, "leftLight", &parsedBoolValue)) {
         leftNext.lightOn = parsedBoolValue;
         leftLightChanged = true;
+        lightSourceSide = th::Side::Left;
       }
       if (th::parseJsonBool(buffer, "rightLight", &parsedBoolValue)) {
         rightNext.lightOn = parsedBoolValue;
         rightLightChanged = true;
+        lightSourceSide = th::Side::Right;
+      }
+      if (th::parseJsonBool(buffer, "leftLightBreaker", &parsedBoolValue)) {
+        leftNext.lightBreakerActive = parsedBoolValue;
+        leftLightBreakerChanged = true;
+        lightBreakerSourceSide = th::Side::Left;
+      }
+      if (th::parseJsonBool(buffer, "rightLightBreaker", &parsedBoolValue)) {
+        rightNext.lightBreakerActive = parsedBoolValue;
+        rightLightBreakerChanged = true;
+        lightBreakerSourceSide = th::Side::Right;
+      }
+      if (th::parseJsonBool(buffer, "leftFog", &parsedBoolValue)) {
+        leftNext.fogOn = parsedBoolValue;
+        leftFogChanged = true;
+        fogSourceSide = th::Side::Left;
+      }
+      if (th::parseJsonBool(buffer, "rightFog", &parsedBoolValue)) {
+        rightNext.fogOn = parsedBoolValue;
+        rightFogChanged = true;
+        fogSourceSide = th::Side::Right;
       }
 
       if (!motorLinkEnabled) {
@@ -549,6 +632,74 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
       }
       if (!eyeballLinkEnabled) {
         eyeballMirrorEnabled = false;
+      }
+
+      const SideControlState &leftCurrentBeforeSync = getSideStateConst(th::Side::Left);
+      const SideControlState &rightCurrentBeforeSync = getSideStateConst(th::Side::Right);
+      const bool leftLightEffectivelyChanged = leftLightChanged && (leftNext.lightOn != leftCurrentBeforeSync.lightOn);
+      const bool rightLightEffectivelyChanged = rightLightChanged && (rightNext.lightOn != rightCurrentBeforeSync.lightOn);
+      if (leftLightEffectivelyChanged && !rightLightEffectivelyChanged) {
+        lightSourceSide = th::Side::Left;
+      } else if (rightLightEffectivelyChanged && !leftLightEffectivelyChanged) {
+        lightSourceSide = th::Side::Right;
+      }
+
+      const bool leftLightBreakerEffectivelyChanged = leftLightBreakerChanged && (leftNext.lightBreakerActive != leftCurrentBeforeSync.lightBreakerActive);
+      const bool rightLightBreakerEffectivelyChanged = rightLightBreakerChanged && (rightNext.lightBreakerActive != rightCurrentBeforeSync.lightBreakerActive);
+      if (leftLightBreakerEffectivelyChanged && !rightLightBreakerEffectivelyChanged) {
+        lightBreakerSourceSide = th::Side::Left;
+      } else if (rightLightBreakerEffectivelyChanged && !leftLightBreakerEffectivelyChanged) {
+        lightBreakerSourceSide = th::Side::Right;
+      }
+
+      const bool leftFogEffectivelyChanged = leftFogChanged && (leftNext.fogOn != leftCurrentBeforeSync.fogOn);
+      const bool rightFogEffectivelyChanged = rightFogChanged && (rightNext.fogOn != rightCurrentBeforeSync.fogOn);
+      if (leftFogEffectivelyChanged && !rightFogEffectivelyChanged) {
+        fogSourceSide = th::Side::Left;
+      } else if (rightFogEffectivelyChanged && !leftFogEffectivelyChanged) {
+        fogSourceSide = th::Side::Right;
+      }
+
+      if (lightLinkEnabled && (leftLightChanged || rightLightChanged || syncOptionChanged)) {
+        if (lightSourceSide == th::Side::Unknown) {
+          lightSourceSide = th::Side::Left;
+        }
+
+        if (lightSourceSide == th::Side::Left) {
+          rightNext.lightOn = leftNext.lightOn;
+          rightLightChanged = true;
+        } else {
+          leftNext.lightOn = rightNext.lightOn;
+          leftLightChanged = true;
+        }
+      }
+
+      if (lightLinkEnabled && (leftLightBreakerChanged || rightLightBreakerChanged || syncOptionChanged)) {
+        if (lightBreakerSourceSide == th::Side::Unknown) {
+          lightBreakerSourceSide = th::Side::Left;
+        }
+
+        if (lightBreakerSourceSide == th::Side::Left) {
+          rightNext.lightBreakerActive = leftNext.lightBreakerActive;
+          rightLightBreakerChanged = true;
+        } else {
+          leftNext.lightBreakerActive = rightNext.lightBreakerActive;
+          leftLightBreakerChanged = true;
+        }
+      }
+
+      if (fogLinkEnabled && (leftFogChanged || rightFogChanged || syncOptionChanged)) {
+        if (fogSourceSide == th::Side::Unknown) {
+          fogSourceSide = th::Side::Left;
+        }
+
+        if (fogSourceSide == th::Side::Left) {
+          rightNext.fogOn = leftNext.fogOn;
+          rightFogChanged = true;
+        } else {
+          leftNext.fogOn = rightNext.fogOn;
+          leftFogChanged = true;
+        }
       }
 
       int tempValue = 0;
@@ -652,6 +803,46 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
           rightCurrent.lightOn = rightNext.lightOn;
           Serial.printf("[LIGHT RIGHT] %s\n", rightCurrent.lightOn ? "ON" : "OFF");
           sendLightToRemoteSatelliteNodes(th::Side::Right, rightCurrent.lightOn);
+          stateChanged = true;
+        }
+      }
+
+      if (leftLightBreakerChanged) {
+        SideControlState &leftCurrent = getSideState(th::Side::Left);
+        if (leftCurrent.lightBreakerActive != leftNext.lightBreakerActive) {
+          leftCurrent.lightBreakerActive = leftNext.lightBreakerActive;
+          Serial.printf("[LIGHT BREAKER LEFT] %s\n", leftCurrent.lightBreakerActive ? "ACTIVE" : "RELEASED");
+          sendLightBreakerToRemoteSatelliteNodes(th::Side::Left, leftCurrent.lightBreakerActive);
+          stateChanged = true;
+        }
+      }
+
+      if (rightLightBreakerChanged) {
+        SideControlState &rightCurrent = getSideState(th::Side::Right);
+        if (rightCurrent.lightBreakerActive != rightNext.lightBreakerActive) {
+          rightCurrent.lightBreakerActive = rightNext.lightBreakerActive;
+          Serial.printf("[LIGHT BREAKER RIGHT] %s\n", rightCurrent.lightBreakerActive ? "ACTIVE" : "RELEASED");
+          sendLightBreakerToRemoteSatelliteNodes(th::Side::Right, rightCurrent.lightBreakerActive);
+          stateChanged = true;
+        }
+      }
+
+      if (leftFogChanged) {
+        SideControlState &leftCurrent = getSideState(th::Side::Left);
+        if (leftCurrent.fogOn != leftNext.fogOn) {
+          leftCurrent.fogOn = leftNext.fogOn;
+          Serial.printf("[FOG LEFT] %s\n", leftCurrent.fogOn ? "ON" : "OFF");
+          sendFogToRemoteSatelliteNodes(th::Side::Left, leftCurrent.fogOn);
+          stateChanged = true;
+        }
+      }
+
+      if (rightFogChanged) {
+        SideControlState &rightCurrent = getSideState(th::Side::Right);
+        if (rightCurrent.fogOn != rightNext.fogOn) {
+          rightCurrent.fogOn = rightNext.fogOn;
+          Serial.printf("[FOG RIGHT] %s\n", rightCurrent.fogOn ? "ON" : "OFF");
+          sendFogToRemoteSatelliteNodes(th::Side::Right, rightCurrent.fogOn);
           stateChanged = true;
         }
       }

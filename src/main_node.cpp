@@ -17,6 +17,7 @@ const char* COORDINATOR_IP = "192.168.4.1";  // Standard IP des Coordinators
 const uint16_t COORDINATOR_PORT = 5000 + NODE_ID;  // Je Node ein eigener Port
 const uint16_t PWM_PIN = 3;                  // PWM fuer Motor an GPIO3
 const uint16_t RELAY_LIGHT_PIN = 5;          // Relay control pin for satellite light output
+const uint16_t RELAY_FOG_PIN = 4;            // Relay control pin for satellite fog output
 const bool RELAY_ACTIVE_HIGH = true;
 
 // ============ GLOBALE VARIABLEN ============
@@ -26,6 +27,8 @@ uint8_t currentMotorDir = 0;
 int16_t currentServoUpdown = 0;
 int16_t currentServoLateral = 0;
 bool currentLightOn = false;
+bool currentLightBreakerActive = false;
+bool currentFogOn = false;
 bool nodeReadySent = false;
 uint32_t lastHeartbeatSentMs = 0;
 const uint32_t HEARTBEAT_INTERVAL_MS = 1000;
@@ -40,9 +43,23 @@ void applyDcMotor(uint8_t pwmValue, uint8_t dirValue) {
 
 void applyLightRelay(bool lightOn) {
   currentLightOn = lightOn;
+  bool effectiveLightOn = currentLightOn && !currentLightBreakerActive;
   int relayLevel = (RELAY_ACTIVE_HIGH ? HIGH : LOW);
   int relayOffLevel = (RELAY_ACTIVE_HIGH ? LOW : HIGH);
-  digitalWrite(RELAY_LIGHT_PIN, currentLightOn ? relayLevel : relayOffLevel);
+  digitalWrite(RELAY_LIGHT_PIN, effectiveLightOn ? relayLevel : relayOffLevel);
+}
+
+void applyLightBreaker(bool breakerActive) {
+  currentLightBreakerActive = breakerActive;
+  // Re-apply light output with breaker override.
+  applyLightRelay(currentLightOn);
+}
+
+void applyFogRelay(bool fogOn) {
+  currentFogOn = fogOn;
+  int relayLevel = (RELAY_ACTIVE_HIGH ? HIGH : LOW);
+  int relayOffLevel = (RELAY_ACTIVE_HIGH ? LOW : HIGH);
+  digitalWrite(RELAY_FOG_PIN, currentFogOn ? relayLevel : relayOffLevel);
 }
 
 // ============ SETUP ============
@@ -61,8 +78,12 @@ void setup() {
 
   if (th::isSatelliteRole(thisNodeProfile.role)) {
     pinMode(RELAY_LIGHT_PIN, OUTPUT);
+    pinMode(RELAY_FOG_PIN, OUTPUT);
     applyLightRelay(false);
+    applyLightBreaker(false);
+    applyFogRelay(false);
     Serial.printf("[LIGHT] Relay output initialized on GPIO%d\n", RELAY_LIGHT_PIN);
+    Serial.printf("[FOG] Relay output initialized on GPIO%d\n", RELAY_FOG_PIN);
   }
 
   // Verbindung zum Coordinator-WLAN
@@ -163,10 +184,43 @@ void loop() {
           bool requestedLightOn = (lightState != 0);
           if (requestedLightOn != currentLightOn) {
             applyLightRelay(requestedLightOn);
-            Serial.printf("[LIGHT %s] %s\n", th::toString(thisNodeProfile.side), currentLightOn ? "ON" : "OFF");
+            Serial.printf("[LIGHT %s] %s%s\n",
+                          th::toString(thisNodeProfile.side),
+                          currentLightOn ? "ON" : "OFF",
+                          currentLightBreakerActive ? " (breaker active)" : "");
           }
         } else {
           Serial.printf("[LIGHT] Ignored (node role %s)\n", th::toString(thisNodeProfile.role));
+        }
+        continue;
+      }
+
+      int lightBreakerState = -1;
+      if (th::tryParseLightBreakerCommand(line, &lightBreakerState)) {
+        if (th::isSatelliteRole(thisNodeProfile.role)) {
+          bool requestedBreakerActive = (lightBreakerState != 0);
+          if (requestedBreakerActive != currentLightBreakerActive) {
+            applyLightBreaker(requestedBreakerActive);
+            Serial.printf("[LIGHT BREAKER %s] %s\n",
+                          th::toString(thisNodeProfile.side),
+                          currentLightBreakerActive ? "ACTIVE" : "RELEASED");
+          }
+        } else {
+          Serial.printf("[LIGHT BREAKER] Ignored (node role %s)\n", th::toString(thisNodeProfile.role));
+        }
+        continue;
+      }
+
+      int fogState = -1;
+      if (th::tryParseFogCommand(line, &fogState)) {
+        if (th::isSatelliteRole(thisNodeProfile.role)) {
+          bool requestedFogOn = (fogState != 0);
+          if (requestedFogOn != currentFogOn) {
+            applyFogRelay(requestedFogOn);
+            Serial.printf("[FOG %s] %s\n", th::toString(thisNodeProfile.side), currentFogOn ? "ON" : "OFF");
+          }
+        } else {
+          Serial.printf("[FOG] Ignored (node role %s)\n", th::toString(thisNodeProfile.role));
         }
         continue;
       }

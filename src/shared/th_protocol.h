@@ -54,6 +54,24 @@ inline bool tryParseLightCommand(const String& line, int* lightState) {
   return true;
 }
 
+inline bool tryParseLightBreakerCommand(const String& line, int* breakerState) {
+  if (!line.startsWith("LB:")) {
+    return false;
+  }
+
+  *breakerState = line.substring(3).toInt();
+  return true;
+}
+
+inline bool tryParseFogCommand(const String& line, int* fogState) {
+  if (!line.startsWith("F:")) {
+    return false;
+  }
+
+  *fogState = line.substring(2).toInt();
+  return true;
+}
+
 inline void buildMotorCommand(uint8_t pwmValue, uint8_t dirValue, char* buffer, size_t bufferSize) {
   snprintf(buffer, bufferSize, "M:%u:%u\n", pwmValue, dirValue ? 1 : 0);
 }
@@ -64,6 +82,14 @@ inline void buildServoCommand(int16_t updownValue, int16_t lateralValue, char* b
 
 inline void buildLightCommand(bool lightOn, char* buffer, size_t bufferSize) {
   snprintf(buffer, bufferSize, "L:%u\n", lightOn ? 1 : 0);
+}
+
+inline void buildLightBreakerCommand(bool breakerActive, char* buffer, size_t bufferSize) {
+  snprintf(buffer, bufferSize, "LB:%u\n", breakerActive ? 1 : 0);
+}
+
+inline void buildFogCommand(bool fogOn, char* buffer, size_t bufferSize) {
+  snprintf(buffer, bufferSize, "F:%u\n", fogOn ? 1 : 0);
 }
 
 }  // namespace th
