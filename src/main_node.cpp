@@ -38,6 +38,10 @@
 #include "node/th_base_angle_sensor.h"
 #endif
 
+#if TH_NODE_ENABLE_EYEBALL_SERVOS
+#include "node/th_satellite_servo_controller.h"
+#endif
+
 // ============ KONFIGURATION ============
 const char* WIFI_SSID = "ESP_TH";            // Muss gleich wie Coordinator sein
 const char* WIFI_PASS = "TurningHeads123";   // Muss gleich wie Coordinator sein
@@ -46,6 +50,20 @@ const uint16_t COORDINATOR_PORT = 5000 + NODE_ID;  // Je Node ein eigener Port
 
 #if TH_NODE_ENABLE_DC_MOTOR
 const uint16_t PWM_PIN = 3;                  // PWM fuer Motor an GPIO3
+#endif
+
+#if TH_NODE_ENABLE_EYEBALL_SERVOS
+const uint8_t SERVO_UART_TX_PIN = 21;
+const uint8_t SERVO_UART_RX_PIN = 20;
+const uint32_t SERVO_BAUD = 1000000;
+const uint8_t SERVO_UPDOWN_ID = 1;
+const uint8_t SERVO_LATERAL_ID = 2;
+const uint16_t SERVO_POS_MIN = 0;
+const uint16_t SERVO_POS_MAX = 1023;
+const uint16_t SERVO_POS_CENTER = 511;
+const int16_t SERVO_UPDOWN_LIMIT = 140;
+const int16_t SERVO_LATERAL_LIMIT = 160;
+const uint16_t SERVO_SPEED = 4095;
 #endif
 
 #if TH_NODE_ENABLE_SAT_RELAYS
@@ -71,6 +89,21 @@ th::NodeMotorDriver motorDriver(PWM_PIN);
 
 int16_t currentServoUpdown = 0;
 int16_t currentServoLateral = 0;
+
+#if TH_NODE_ENABLE_EYEBALL_SERVOS
+th::SatelliteServoController satelliteServoController(
+  SERVO_UART_TX_PIN,
+  SERVO_UART_RX_PIN,
+  SERVO_BAUD,
+  SERVO_UPDOWN_ID,
+  SERVO_LATERAL_ID,
+  SERVO_POS_MIN,
+  SERVO_POS_MAX,
+  SERVO_POS_CENTER,
+  SERVO_UPDOWN_LIMIT,
+  SERVO_LATERAL_LIMIT,
+  SERVO_SPEED);
+#endif
 
 #if TH_NODE_ENABLE_SAT_RELAYS
 th::SatelliteRelays satelliteRelays(RELAY_LIGHT_PIN, RELAY_FOG_PIN, RELAY_ACTIVE_HIGH);
@@ -141,6 +174,22 @@ void setup() {
   }
 #else
   Serial.println("[RELAY] Module not compiled for this node env");
+#endif
+
+#if TH_NODE_ENABLE_EYEBALL_SERVOS
+  if (th::isSatelliteRole(thisNodeProfile.role) && thisNodeProfile.capabilities.hasEyeballServos) {
+    satelliteServoController.begin();
+    Serial.printf("[SERVO] UART initialized TX=%u RX=%u baud=%lu IDs=%u/%u\n",
+                  SERVO_UART_TX_PIN,
+                  SERVO_UART_RX_PIN,
+                  static_cast<unsigned long>(SERVO_BAUD),
+                  SERVO_UPDOWN_ID,
+                  SERVO_LATERAL_ID);
+  } else {
+    Serial.println("[SERVO] Compiled, but role has no eyeball servo capability");
+  }
+#else
+  Serial.println("[SERVO] Module not compiled for this node env");
 #endif
 
   // Verbindung zum Coordinator-WLAN
@@ -237,9 +286,19 @@ void loop() {
       int servoLateral = 0;
       if (th::tryParseServoCommand(line, &servoUpdown, &servoLateral)) {
         if (th::isSatelliteRole(thisNodeProfile.role) && thisNodeProfile.capabilities.hasEyeballServos) {
-          currentServoUpdown = static_cast<int16_t>(servoUpdown);
-          currentServoLateral = static_cast<int16_t>(servoLateral);
-          Serial.printf("[SERVO %s] Target updown=%d lateral=%d (TODO: map to SCServo write)\n",
+          int16_t mappedUpdown = static_cast<int16_t>(servoUpdown);
+          int16_t mappedLateral = static_cast<int16_t>(servoLateral);
+
+          // Right-side satellite uses inverted mechanical orientation on both axes.
+          if (thisNodeProfile.side == th::Side::Right) {
+            mappedUpdown = static_cast<int16_t>(-mappedUpdown);
+            mappedLateral = static_cast<int16_t>(-mappedLateral);
+          }
+
+          satelliteServoController.setTargets(mappedUpdown, mappedLateral);
+          currentServoUpdown = satelliteServoController.currentUpdown();
+          currentServoLateral = satelliteServoController.currentLateral();
+          Serial.printf("[SERVO %s] Target updown=%d lateral=%d\n",
                         th::toString(thisNodeProfile.side),
                         currentServoUpdown,
                         currentServoLateral);

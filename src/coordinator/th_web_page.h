@@ -624,7 +624,7 @@ inline const char* getWebPageHtml() {
     const wsStatus = document.getElementById('wsStatus');
     const nodeStatus = document.getElementById('nodeStatus');
     const UPDOWN_LIMIT = 140;
-    const LATERAL_LIMIT = 80;
+    const LATERAL_LIMIT = 160;
     const HEAD_ROTATION_AXIS_MAX = 255;
     const HEAD_ROTATION_DEADZONE = 16;
     let statusSynced = false;

@@ -31,7 +31,7 @@ const uint8_t AS5600_SDA_PIN = 8;
 const uint8_t AS5600_SCL_PIN = 9;
 const uint32_t AS5600_POLL_INTERVAL_MS = 20;
 int16_t updown_pos_limit = 140;
-int16_t lateral_pos_limit = 80;
+int16_t lateral_pos_limit = 160;
 const uint16_t SERVO_SPEED = 4095;  // Explicit max speed (stable setting)
 
 // ============ GLOBALE VARIABLEN ============
